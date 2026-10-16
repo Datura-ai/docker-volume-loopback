@@ -1,14 +1,14 @@
 # build
-FROM golang:1.11-alpine as builder
+FROM golang:1.26-alpine AS builder
 RUN apk --no-cache add make
 ADD ./ /go/src/github.com/ashald/docker-volume-loopback/
 WORKDIR /go/src/github.com/ashald/docker-volume-loopback
-RUN make build && \
+RUN CGO_ENABLED=0 make build && \
     mv ./docker-volume-loopback /
 
 
 # package
-FROM alpine
+FROM alpine:3.24
 RUN apk --no-cache add \
     # fs detection
     file \

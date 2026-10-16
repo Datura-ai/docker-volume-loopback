@@ -18,7 +18,10 @@ var (
 
 	MkFsOptions = map[string][]string{
 		"ext4": {"-F"},
-		"xfs":  {"-f"},
+		// the feature set xfsprogs 4.19 (the 2019 image) made, so every kernel that mounts
+		// those volumes mounts these: newer mkfs defaults need up to kernel 6.10
+		"xfs": {"-f", "-m", "reflink=0,rmapbt=0,bigtime=0,inobtcount=0",
+			"-i", "nrext64=0,exchange=0", "-n", "parent=0"},
 	}
 
 	MountOptions = map[string][]string{
