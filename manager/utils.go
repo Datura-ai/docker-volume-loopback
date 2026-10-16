@@ -73,3 +73,18 @@ func runCommand(ctx *context.Context, name string, args ...string) (output strin
 
 	return
 }
+
+func isMountPoint(path string) (bool, error) {
+	data, err := exec.Command("findmnt", "--noheadings", "--raw", "--mountpoint", path, "--output", "TARGET").CombinedOutput()
+	output := strings.TrimSpace(string(data))
+	if err == nil {
+		if output == "" {
+			return false, errors.Errorf("findmnt returned no mount information for '%s'", path)
+		}
+		return true, nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 && output == "" {
+		return false, nil
+	}
+	return false, errors.Wrapf(err, "cannot check kernel mount state at '%s': %s", path, output)
+}

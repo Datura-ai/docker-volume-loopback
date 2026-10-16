@@ -556,7 +556,8 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 		ctx.
 			Level(context.Trace).
 			Message("checking if volume is mounted anywhere else")
-		isAlreadyMounted, err = volume.IsMounted(ctx.Derived()) // checking mount status early before we record a lease
+		// Lease files can survive a plugin restart after the kernel mount is lost.
+		isAlreadyMounted, err = isMountPoint(volume.MountPointPath)
 		if err != nil {
 			err = errors.Wrap(err, "cannot check volume mount status")
 			return
@@ -616,27 +617,30 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				return
 			}
 		}
-		if leaseStat != nil {
-			err = errors.Wrapf(err, "lease file '%s' already exists", leaseFile)
-			return
-		}
-
-		ctx.
-			Level(context.Trace).
-			Message("creating lease-file exists")
-		_, err = os.Create(leaseFile)
-		if err != nil {
-			err = errors.Wrapf(err, "cannot create lease file '%s'", lease)
-			return
-		}
-		defer func() {
+		if leaseStat == nil {
+			ctx.
+				Level(context.Trace).
+				Message("creating lease-file")
+			var file *os.File
+			file, err = os.Create(leaseFile)
 			if err != nil {
-				ctx.
-					Level(context.Trace).
-					Message("attempting to cleanup lease-file")
-				_ = os.Remove(leaseFile)
+				err = errors.Wrapf(err, "cannot create lease file '%s'", lease)
+				return
 			}
-		}()
+			defer func() {
+				if err != nil {
+					ctx.
+						Level(context.Trace).
+						Message("attempting to cleanup lease-file")
+					_ = os.Remove(leaseFile)
+				}
+			}()
+			err = file.Close()
+			if err != nil {
+				err = errors.Wrapf(err, "cannot close lease file '%s'", lease)
+				return
+			}
+		}
 	}
 
 	// mount
@@ -656,6 +660,14 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				Message("creating mount-point")
 
 			err = os.Mkdir(volume.MountPointPath, mountPointMode)
+			if os.IsExist(err) {
+				// Reuse only an empty directory left by an interrupted mount.
+				var entries []os.FileInfo
+				entries, err = ioutil.ReadDir(volume.MountPointPath)
+				if err == nil && len(entries) != 0 {
+					err = errors.Errorf("mount point dir '%s' is not empty", volume.MountPointPath)
+				}
+			}
 			if err != nil {
 				err = errors.Wrapf(err, "cannot create mount point dir '%s'", volume.MountPointPath)
 				return
@@ -687,7 +699,7 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				ctx.
 					Level(context.Trace).
 					Message("attempting to cleanup internal mount-point")
-				_ = os.RemoveAll(volume.MountPointPath)
+				_ = os.Remove(volume.MountPointPath)
 
 				err = errors.Wrapf(err,
 					"cannot mount data file '%s' at '%s': %s",
