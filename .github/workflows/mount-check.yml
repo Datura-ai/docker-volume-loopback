@@ -37,14 +37,13 @@ jobs:
           docker run -d --privileged --name dind -e DOCKER_TLS_CERTDIR= docker:27.5.1-dind
           for i in $(seq 1 30); do docker exec dind docker info >/dev/null 2>&1 && break; sleep 2; done
           docker exec dind docker info --format '{{.ServerVersion}} {{.Driver}} {{.DockerRootDir}}'
-      - name: install both plugin builds and mount a volume on each
+      - name: install the v3 build the way the validator does and mount a 1g volume as /root
         run: |
           set -x
-          for v in 1:v2 2:v3; do tag=${v%%:*}; alias=${v##*:}
-            docker exec dind docker plugin install daturaai/docker-volume-loopback:1.0.0-lium$tag --disable --alias vloopback:$alias --grant-all-permissions DATA_DIR=/srv/var/lib/docker/vloopback-$alias STATE_DIR=/srv/run/docker-volume-loopback-$alias LOG_LEVEL=4
-            docker exec dind docker plugin enable vloopback:$alias
-            docker exec dind docker volume create -d vloopback:$alias -o size=512MiB -o fs=xfs vol_$alias
-            docker exec dind docker run --rm -v vol_$alias:/data alpine:3.24 sh -c "echo hello > /data/f && cat /data/f && df -T /data | tail -1" || echo "RUN_FAILED alias=$alias"
-            docker exec dind sh -c 'losetup -l; blkid -p /dev/loop* 2>&1 | head; grep -c xfs /proc/filesystems'
-          done
-          docker logs dind 2>&1 | grep -iE "loopback|mount|losetup|blkid|loop" | tail -40
+          docker exec dind docker plugin install daturaai/docker-volume-loopback:1.0.0-lium2 --disable --alias vloopback:v3 --grant-all-permissions DATA_DIR=/srv/var/lib/docker/vloopback-v3 STATE_DIR=/srv/run/docker-volume-loopback-v3
+          docker exec dind docker plugin set vloopback:v3 LOG_LEVEL=4
+          docker exec dind docker plugin enable vloopback:v3
+          docker exec dind docker volume create -d vloopback:v3 -o size=1g volume_e2e
+          docker exec dind docker run --rm -v volume_e2e:/root alpine:3.24 sh -c "ls -la /root; echo hello > /root/f && cat /root/f && df -T /root | tail -1" || echo "RUN_FAILED"
+          docker exec dind sh -c 'ls -la /dev/loop* ; cat /proc/filesystems | grep -c xfs; dmesg 2>/dev/null | tail -20 || true'
+          docker logs dind 2>&1 | grep -E "runCommand|Mount" | grep -E "param/|return/|err" | sed "s/.*msg=//" | cut -c1-300 | tail -30
