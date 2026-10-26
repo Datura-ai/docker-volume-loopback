@@ -738,6 +738,18 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 					volume.DataFilePath, loopDevice, volume.MountPointPath, errStr)
 				return
 			}
+
+			// Detaching a busy loop device only marks it autoclear: the kernel frees it with the
+			// last unmount, as it does for the implicit loop of `mount`, so a mount lost outside
+			// UnMount does not leak the device.
+			ctx.
+				Level(context.Trace).
+				Message("marking the loop device autoclear")
+			errStr, err = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
+			if err != nil {
+				err = errors.Wrapf(err, "cannot mark loop device '%s' autoclear: %s", loopDevice, errStr)
+				return
+			}
 		}
 	}
 

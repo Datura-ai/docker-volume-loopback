@@ -23,7 +23,9 @@ go test -mod=vendor -vet=off ./...
 GOOS=linux GOARCH="$test_arch" CGO_ENABLED=0 \
     go test -mod=vendor -vet=off -c -o "$test_dir/recovery.test" ./manager
 docker build -t lium-loopback-recovery-tests:local -f tests/recovery.Dockerfile .
-container_id=$(docker create --privileged --network none \
+# the host's /dev, as the plugin has it (config.json Mounts): a loop node allocated through
+# /dev/loop-control appears there, not in the container's static /dev
+container_id=$(docker create --privileged --network none -v /dev:/dev \
     --label lium.test=loopback-mount-recovery \
     -e LOOPBACK_MOUNT_TESTS=1 \
     lium-loopback-recovery-tests:local /recovery.test -test.v)
