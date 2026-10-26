@@ -1,0 +1,30 @@
+name: mount-check
+on: [push, pull_request]
+jobs:
+  direct-io-loop:
+    # the same ground the lium-io e2e stand runs on: a GitHub runner kernel, the plugin's Alpine userland
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: probe a direct-I/O loop the way Mount does
+        run: |
+          uname -r; grep -c xfs /proc/filesystems || true; lsmod | grep -E "^(xfs|loop)" || true
+          docker run --rm --privileged -v /dev:/dev -v "$PWD/tests:/tests" alpine:3.24 sh -c '
+            set -x
+            apk --no-cache add -q util-linux xfsprogs e2fsprogs file blkid
+            mount --version; losetup --version
+            truncate -s 512M /tmp/img
+            mkfs.xfs -f -m reflink=0,rmapbt=0,bigtime=0,inobtcount=0 -i nrext64=0,exchange=0 -n parent=0 -s size=4096 /tmp/img >/dev/null && echo mkfs_ok
+            file -s /tmp/img
+            dev=$(losetup --direct-io=on --sector-size 4096 --find --show /tmp/img); echo "dev=$dev"
+            losetup -l "$dev"
+            blkid -p "$dev" || echo "blkid_exit=$?"
+            mkdir -p /mnt/t
+            mount -o nouuid "$dev" /mnt/t && { echo mount_auto_ok; umount /mnt/t; } || echo "mount_auto_exit=$?"
+            mount -t xfs -o nouuid "$dev" /mnt/t && { echo mount_t_xfs_ok; umount /mnt/t; } || echo "mount_t_xfs_exit=$?"
+            losetup -d "$dev" || true
+            dev2=$(losetup --find --show /tmp/img); blkid -p "$dev2" || echo "blkid_buffered_exit=$?"; losetup -d "$dev2"
+            dmesg 2>/dev/null | tail -5 || true
+          '
+      - name: mount recovery tests
+        run: bash tests/run-mount-recovery.sh
