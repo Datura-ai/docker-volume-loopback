@@ -21,8 +21,16 @@ var (
 		// the feature set xfsprogs 4.19 (the 2019 image) made, so every kernel that mounts
 		// those volumes mounts these: newer mkfs defaults need up to kernel 6.10
 		"xfs": {"-f", "-m", "reflink=0,rmapbt=0,bigtime=0,inobtcount=0",
-			"-i", "nrext64=0,exchange=0", "-n", "parent=0"},
+			"-i", "nrext64=0,exchange=0", "-n", "parent=0",
+			// the loop device below has 4096-byte sectors; xfs refuses a 512-byte-sector image on it
+			"-s", "size=4096"},
 	}
+
+	// Direct I/O bypasses the host page cache for the image file: the volume's unwritten data lives
+	// only in the volume's own filesystem and disappears when its files are unlinked, instead of being
+	// flushed to disk by every overlay unmount on the host. 4096-byte sectors align with any backing
+	// filesystem; without them direct I/O is EINVAL on hosts with 4K-sector disks.
+	LoopOptions = []string{"--direct-io=on", "--sector-size", "4096"}
 
 	MountOptions = map[string][]string{
 		"ext4": {},
@@ -683,18 +691,15 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				return
 			}
 
-			mountFlags := MountOptions[fs]
-
 			ctx.
 				Level(context.Trace).
-				Field("mount-flags", mountFlags).
-				Message("mounting volume to its internal mount-point")
-			var errStr string
-			errStr, err = runCommand(ctx.Derived(),
-				"mount",
-				append(mountFlags, volume.DataFilePath, volume.MountPointPath)...,
+				Field("loop-options", LoopOptions).
+				Message("attaching data file to a loop device")
+			var loopDevice string
+			loopDevice, err = runCommand(ctx.Derived(),
+				"losetup",
+				append(append([]string{}, LoopOptions...), "--find", "--show", volume.DataFilePath)...,
 			)
-
 			if err != nil {
 				ctx.
 					Level(context.Trace).
@@ -702,8 +707,35 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				_ = os.Remove(volume.MountPointPath)
 
 				err = errors.Wrapf(err,
-					"cannot mount data file '%s' at '%s': %s",
-					volume.DataFilePath, volume.MountPointPath, errStr)
+					"cannot attach data file '%s' to a loop device: %s",
+					volume.DataFilePath, loopDevice)
+				return
+			}
+			loopDevice = strings.TrimSpace(loopDevice)
+
+			mountFlags := MountOptions[fs]
+
+			ctx.
+				Level(context.Trace).
+				Field("loop-device", loopDevice).
+				Field("mount-flags", mountFlags).
+				Message("mounting volume to its internal mount-point")
+			var errStr string
+			errStr, err = runCommand(ctx.Derived(),
+				"mount",
+				append(mountFlags, loopDevice, volume.MountPointPath)...,
+			)
+
+			if err != nil {
+				ctx.
+					Level(context.Trace).
+					Message("attempting to cleanup loop device and internal mount-point")
+				_, _ = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
+				_ = os.Remove(volume.MountPointPath)
+
+				err = errors.Wrapf(err,
+					"cannot mount data file '%s' (%s) at '%s': %s",
+					volume.DataFilePath, loopDevice, volume.MountPointPath, errStr)
 				return
 			}
 		}
