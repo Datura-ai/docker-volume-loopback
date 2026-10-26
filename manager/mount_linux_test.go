@@ -16,6 +16,11 @@ const recoveryVolumeName = "recovery-test"
 
 func recoveryManager(t *testing.T, fs string) Manager {
 	t.Helper()
+	return recoveryManagerWithSize(t, fs, 1<<30)
+}
+
+func recoveryManagerWithSize(t *testing.T, fs string, sizeInBytes int64) Manager {
+	t.Helper()
 	if os.Getenv("LOOPBACK_MOUNT_TESTS") != "1" {
 		t.Skip("set LOOPBACK_MOUNT_TESTS=1 inside a disposable privileged Linux container")
 	}
@@ -32,7 +37,7 @@ func recoveryManager(t *testing.T, fs string) Manager {
 		// Only the mount created under this test's private temporary directory.
 		exec.Command("umount", filepath.Join(m.mountDir, recoveryVolumeName)).Run()
 	})
-	if err := m.Create(context.New(), recoveryVolumeName, 1<<30, true, fs, -1, -1, 0); err != nil {
+	if err := m.Create(context.New(), recoveryVolumeName, sizeInBytes, true, fs, -1, -1, 0); err != nil {
 		t.Fatal(err)
 	}
 	return m
@@ -184,5 +189,17 @@ func TestUnmountAfterRepeatedMountPreservesOtherLease(t *testing.T) {
 	}
 	if mounted, err := isMountPoint(path); err != nil || mounted {
 		t.Fatalf("last lease did not release the mount: mounted=%v, err=%v", mounted, err)
+	}
+}
+
+func TestMountVolumeWhoseSizeIsNotASectorMultiple(t *testing.T) {
+	// the validator asks for "<n>g" = n*10^9 bytes, which is never a multiple of 4096
+	for _, fs := range []string{"xfs", "ext4"} {
+		m := recoveryManagerWithSize(t, fs, 1000000000)
+		path := mountRecoveryVolume(t, m, "container-one")
+		writeRecoveryMarker(t, path)
+		if err := m.UnMount(context.New(), recoveryVolumeName, "container-one"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

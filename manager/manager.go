@@ -31,6 +31,9 @@ var (
 	// flushed to disk by every overlay unmount on the host. 4096-byte sectors align with any backing
 	// filesystem; without them direct I/O is EINVAL on hosts with 4K-sector disks.
 	LoopOptions = []string{"--direct-io=on", "--sector-size", "4096"}
+	// the --sector-size above: a data file is sized in whole sectors, since the loop device drops a
+	// partial last sector and the read error there makes blkid blind to the filesystem
+	LoopSectorSize = int64(4096)
 
 	MountOptions = map[string][]string{
 		"ext4": {},
@@ -316,6 +319,7 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 			return errors.Errorf(
 				"requested size '%d' is smaller than minimum allowed 20MB", sizeInBytes)
 		}
+		sizeInBytes = (sizeInBytes + LoopSectorSize - 1) / LoopSectorSize * LoopSectorSize
 
 		// We perform fs validation and construct mkfs flags array on the way
 		ctx.
@@ -721,9 +725,11 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				Field("mount-flags", mountFlags).
 				Message("mounting volume to its internal mount-point")
 			var errStr string
+			// explicit type: without it mount asks blkid and, when that answers nothing, walks
+			// /proc/filesystems, which lacks xfs on a host that never loaded the module
 			errStr, err = runCommand(ctx.Derived(),
 				"mount",
-				append(mountFlags, loopDevice, volume.MountPointPath)...,
+				append(append([]string{"-t", fs}, mountFlags...), loopDevice, volume.MountPointPath)...,
 			)
 
 			if err != nil {

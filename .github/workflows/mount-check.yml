@@ -1,5 +1,15 @@
 name: mount-check
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      push_tag:
+        description: "build the plugin from this commit and push it to Docker Hub under this tag (e.g. 1.0.0-lium3)"
+        required: true
+env:
+  # the published build the dind check installs; bump after a push
+  PLUGIN_TAG: 1.0.0-lium2
 jobs:
   direct-io-loop:
     # the same ground the lium-io e2e stand runs on: a GitHub runner kernel, the plugin's Alpine userland
@@ -40,10 +50,29 @@ jobs:
       - name: install the v3 build the way the validator does and mount a 1g volume as /root
         run: |
           set -x
-          docker exec dind docker plugin install daturaai/docker-volume-loopback:1.0.0-lium2 --disable --alias vloopback:v3 --grant-all-permissions DATA_DIR=/srv/var/lib/docker/vloopback-v3 STATE_DIR=/srv/run/docker-volume-loopback-v3
+          docker exec dind docker plugin install daturaai/docker-volume-loopback:$PLUGIN_TAG --disable --alias vloopback:v3 --grant-all-permissions DATA_DIR=/srv/var/lib/docker/vloopback-v3 STATE_DIR=/srv/run/docker-volume-loopback-v3
           docker exec dind docker plugin set vloopback:v3 LOG_LEVEL=4
           docker exec dind docker plugin enable vloopback:v3
           docker exec dind docker volume create -d vloopback:v3 -o size=1g volume_e2e
           docker exec dind docker run --rm -v volume_e2e:/root alpine:3.24 sh -c "ls -la /root; echo hello > /root/f && cat /root/f && df -T /root | tail -1" || echo "RUN_FAILED"
           docker exec dind sh -c 'ls -la /dev/loop* ; cat /proc/filesystems | grep -c xfs; dmesg 2>/dev/null | tail -20 || true'
           docker logs dind 2>&1 | grep -E "runCommand|Mount" | grep -E "param/|return/|err" | sed "s/.*msg=//" | cut -c1-300 | tail -30
+  build-and-push:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the plugin rootfs and create the plugin
+        run: |
+          make rootfs
+          docker plugin create daturaai/docker-volume-loopback:${{ inputs.push_tag }} ./plugin
+      - name: push
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          docker plugin push daturaai/docker-volume-loopback:${{ inputs.push_tag }}
+          docker logout
+      - name: manifest digest to pin in the validator
+        run: |
+          token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:daturaai/docker-volume-loopback:pull" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+          curl -sI -H "Authorization: Bearer $token" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            "https://registry-1.docker.io/v2/daturaai/docker-volume-loopback/manifests/${{ inputs.push_tag }}" | grep -i docker-content-digest
