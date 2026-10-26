@@ -54,9 +54,12 @@ jobs:
           docker exec dind docker plugin set vloopback:v3 LOG_LEVEL=4
           docker exec dind docker plugin enable vloopback:v3
           docker exec dind docker volume create -d vloopback:v3 -o size=1g volume_e2e
-          docker exec dind docker run --rm -v volume_e2e:/root alpine:3.24 sh -c "ls -la /root; echo hello > /root/f && cat /root/f && df -T /root | tail -1" || echo "RUN_FAILED"
+          # the diagnostics below must still print when the mount fails; the step fails afterwards
+          run_status=0
+          docker exec dind docker run --rm -v volume_e2e:/root alpine:3.24 sh -c "ls -la /root; echo hello > /root/f && cat /root/f && df -T /root | tail -1" || run_status=$?
           docker exec dind sh -c 'ls -la /dev/loop* ; cat /proc/filesystems | grep -c xfs; dmesg 2>/dev/null | tail -20 || true'
           docker logs dind 2>&1 | grep -E "runCommand|Mount" | grep -E "param/|return/|err" | sed "s/.*msg=//" | cut -c1-300 | tail -30
+          exit $run_status
   build-and-push:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
