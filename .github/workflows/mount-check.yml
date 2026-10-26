@@ -28,3 +28,23 @@ jobs:
           '
       - name: mount recovery tests
         run: bash tests/run-mount-recovery.sh
+  plugin-inside-dind:
+    # the lium-io e2e stand: the published plugin under a docker:27 dind daemon on a GitHub runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: start dind
+        run: |
+          docker run -d --privileged --name dind -e DOCKER_TLS_CERTDIR= docker:27.5.1-dind
+          for i in $(seq 1 30); do docker exec dind docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker exec dind docker info --format '{{.ServerVersion}} {{.Driver}} {{.DockerRootDir}}'
+      - name: install both plugin builds and mount a volume on each
+        run: |
+          set -x
+          for v in 1:v2 2:v3; do tag=${v%%:*}; alias=${v##*:}
+            docker exec dind docker plugin install daturaai/docker-volume-loopback:1.0.0-lium$tag --disable --alias vloopback:$alias --grant-all-permissions DATA_DIR=/srv/var/lib/docker/vloopback-$alias STATE_DIR=/srv/run/docker-volume-loopback-$alias LOG_LEVEL=4
+            docker exec dind docker plugin enable vloopback:$alias
+            docker exec dind docker volume create -d vloopback:$alias -o size=512MiB -o fs=xfs vol_$alias
+            docker exec dind docker run --rm -v vol_$alias:/data alpine:3.24 sh -c "echo hello > /data/f && cat /data/f && df -T /data | tail -1" || echo "RUN_FAILED alias=$alias"
+            docker exec dind sh -c 'losetup -l; blkid -p /dev/loop* 2>&1 | head; grep -c xfs /proc/filesystems'
+          done
+          docker logs dind 2>&1 | grep -iE "loopback|mount|losetup|blkid|loop" | tail -40
