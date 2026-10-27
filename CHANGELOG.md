@@ -1,5 +1,14 @@
 # Change Log
 
+## 1.0.0-lium6 - 2026-10-27
+
+### Fixed
+
+- A loop device without direct I/O in effect (a backing filesystem that refuses O_DIRECT, or an
+  unreadable `/sys/block/<loop>/loop/dio`) fails the Mount and is detached, instead of being handed
+  out as a buffered volume with a warning: the host page cache this generation removes would be
+  back behind it.
+
 ## 1.0.0-lium5 - 2026-10-27
 
 ### Fixed

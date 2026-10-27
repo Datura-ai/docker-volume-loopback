@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -228,6 +229,40 @@ func TestMountFromAnotherPluginViewReusesTheLoopDevice(t *testing.T) {
 			}
 			if lines := strings.Fields(string(devices)); len(lines) != 1 {
 				t.Fatalf("the image has %d loop devices, want 1: %s", len(lines), devices)
+			}
+		})
+	}
+}
+
+func TestMountFailsWhenTheLoopHasNoDirectIO(t *testing.T) {
+	// a backing filesystem that refuses O_DIRECT gives a buffered loop behind the same losetup
+	// command, and a buffered loop brings the host page cache back: no volume of this generation
+	// is handed out without direct I/O, and the failed Mount leaves no loop, mount point or lease
+	for name, answer := range map[string]func(string) (string, error){
+		"off":        func(string) (string, error) { return "0", nil },
+		"unreadable": func(string) (string, error) { return "", errors.New("sysfs not readable") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := recoveryManager(t, "xfs")
+			original := readLoopDirectIO
+			readLoopDirectIO = answer
+			t.Cleanup(func() { readLoopDirectIO = original })
+
+			result, err := m.Mount(context.New(), recoveryVolumeName, "container-one")
+
+			if err == nil || result != "" || !strings.Contains(err.Error(), "direct I/O") {
+				t.Fatalf("Mount handed out a loop without direct I/O: path %q, error %v", result, err)
+			}
+			devices, losetupErr := exec.Command("losetup", "--noheadings", "--output", "NAME",
+				"--associated", filepath.Join(m.dataDir, recoveryVolumeName)).CombinedOutput()
+			if losetupErr != nil || strings.TrimSpace(string(devices)) != "" {
+				t.Fatalf("the image kept a loop device: %v: %s", losetupErr, devices)
+			}
+			if _, statErr := os.Stat(filepath.Join(m.mountDir, recoveryVolumeName)); !os.IsNotExist(statErr) {
+				t.Fatalf("the mount point was left behind: %v", statErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(m.stateDir, recoveryVolumeName, "container-one")); !os.IsNotExist(statErr) {
+				t.Fatalf("the lease was left behind: %v", statErr)
 			}
 		})
 	}

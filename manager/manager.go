@@ -38,6 +38,12 @@ var (
 	// the --sector-size above: a data file is sized in whole sectors, since the loop device drops a
 	// partial last sector and the read error there makes blkid blind to the filesystem
 	LoopSectorSize = int64(4096)
+	// a function so a test can stand in for sysfs: forcing a real loop without direct I/O needs a
+	// backing filesystem that refuses O_DIRECT
+	readLoopDirectIO = func(loopDevice string) (string, error) {
+		dio, err := ioutil.ReadFile("/sys/block/" + filepath.Base(loopDevice) + "/loop/dio")
+		return strings.TrimSpace(string(dio)), err
+	}
 
 	MountOptions = map[string][]string{
 		"ext4": {},
@@ -752,12 +758,23 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			loopDevice = strings.TrimSpace(loopDevice)
 
 			// a backing filesystem that refuses O_DIRECT leaves a working buffered loop behind the
-			// same command: say so, since the host page cache is then back
-			if dio, readErr := ioutil.ReadFile("/sys/block/" + filepath.Base(loopDevice) + "/loop/dio"); readErr != nil || strings.TrimSpace(string(dio)) != "1" {
+			// same command, and a buffered loop brings the host page cache back: the Mount fails
+			// (the validator's probe then falls back to the buffered plugin) rather than hand out a
+			// volume this generation makes no promise for
+			if dio, readErr := readLoopDirectIO(loopDevice); readErr != nil || dio != "1" {
 				ctx.
-					Level(context.Warning).
-					Field("loop-device", loopDevice).
-					Message("direct I/O is not in effect on the loop device")
+					Level(context.Trace).
+					Message("attempting to cleanup loop device and internal mount-point")
+				_, _ = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
+				_ = os.Remove(volume.MountPointPath)
+
+				if readErr != nil {
+					err = errors.Wrapf(readErr, "cannot read the direct I/O state of '%s'", loopDevice)
+				} else {
+					err = errors.Errorf("direct I/O is not in effect on '%s' (dio=%s): the backing filesystem refuses O_DIRECT",
+						loopDevice, dio)
+				}
+				return
 			}
 
 			mountFlags := MountOptions[fs]
