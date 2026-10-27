@@ -8,6 +8,8 @@
   gets that device back, as the implicit loop of `mount` gave it. Without it a Mount that did not
   see the first kernel mount (a restarted plugin whose mount view was lost) put a second
   filesystem instance on the same image.
+- A data file made through the `dd` fallback (a data dir without `fallocate`) is also sized in whole
+  4096-byte sectors: `dd` writes whole blocks and `truncate` adds the tail.
 
 ## 1.0.0-lium3 - 2026-10-27
 

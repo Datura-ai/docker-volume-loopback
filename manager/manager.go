@@ -400,8 +400,8 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 
 				// Here we assume that FS is unsupported and will fall back to 'dd' which is slow but should work everywhere
 				of := "of=" + dataFilePath
-				bs := int64(1e6)
-				count := sizeInBytes / bs // we lose some precision here but it's likely to be negligible
+				bs := int64(1 << 20)
+				count := sizeInBytes / bs // the tail below one block is added by the truncate after dd
 				ctx.
 					Level(context.Trace).
 					Message("attempting creation of a regular data-file with 'dd' exec")
@@ -417,6 +417,14 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 						Message("attempting to cleanup data-file")
 					_ = os.Remove(dataFilePath) // Primitive attempt to cleanup
 					err = errors.Wrapf(err, errStr)
+					return
+				}
+
+				// dd wrote whole blocks; the file must still end on a sector boundary (see LoopSectorSize)
+				errStr, err = runCommand(ctx.Derived(), "truncate", "-s", fmt.Sprint(sizeInBytes), dataFilePath)
+				if err != nil {
+					_ = os.Remove(dataFilePath)
+					err = errors.Wrapf(err, "cannot size data-file to whole sectors: %s", errStr)
 					return
 				}
 			}
