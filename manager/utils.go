@@ -88,3 +88,25 @@ func isMountPoint(path string) (bool, error) {
 	}
 	return false, errors.Wrapf(err, "cannot check kernel mount state at '%s': %s", path, output)
 }
+
+// mountBelongsToDataFile reports whether the filesystem mounted at mountPoint sits on a loop
+// device backed by dataFilePath (a same-name volume of another plugin instance, or a foreign
+// mount left at the path, must not be handed out or unmounted as this volume).
+func mountBelongsToDataFile(mountPoint string, dataFilePath string) (bool, error) {
+	source, err := exec.Command("findmnt", "--noheadings", "--raw", "--first-only",
+		"--mountpoint", mountPoint, "--output", "SOURCE").CombinedOutput()
+	if err != nil {
+		return false, errors.Wrapf(err, "cannot read the mount source at '%s': %s", mountPoint, source)
+	}
+	devices, err := exec.Command("losetup", "--noheadings", "--output", "NAME",
+		"--associated", dataFilePath).CombinedOutput()
+	if err != nil {
+		return false, errors.Wrapf(err, "cannot list the loop devices of '%s': %s", dataFilePath, devices)
+	}
+	for _, device := range strings.Fields(string(devices)) {
+		if device == strings.TrimSpace(string(source)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}

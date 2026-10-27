@@ -1,6 +1,6 @@
 # Mount recovery fix
 
-This branch starts at upstream `4d6079b7df8d2f5300e4e271a8b9571feb25618d` and retains the existing Lium build and XFS feature flags. It does not publish a plugin image or change an installed plugin.
+This branch starts at upstream `4d6079b7df8d2f5300e4e271a8b9571feb25618d` and retains the existing Lium build and XFS feature flags. Builds are published by the `build-and-push` job of `.github/workflows/mount-check.yml` (manual dispatch with a tag) as `daturaai/docker-volume-loopback:<tag>`; `CHANGELOG.md` lists them. Installing one on a node is the validator's job.
 
 ## Failure and change
 

@@ -1,6 +1,7 @@
 name: mount-check
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -64,20 +65,25 @@ jobs:
           exit $run_status
   build-and-push:
     if: github.event_name == 'workflow_dispatch'
+    needs: [direct-io-loop]
     runs-on: ubuntu-latest
+    env:
+      PUSH_TAG: ${{ inputs.push_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: build the plugin rootfs and create the plugin
         run: |
+          echo "$PUSH_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-lium[0-9]+$' || { echo "push_tag must look like 1.0.0-lium5"; exit 1; }
           make rootfs
-          docker plugin create daturaai/docker-volume-loopback:${{ inputs.push_tag }} ./plugin
+          docker plugin create "daturaai/docker-volume-loopback:$PUSH_TAG" ./plugin
       - name: push
         run: |
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-          docker plugin push daturaai/docker-volume-loopback:${{ inputs.push_tag }}
+          docker plugin push "daturaai/docker-volume-loopback:$PUSH_TAG"
           docker logout
       - name: manifest digest to pin in the validator
         run: |
+          # an anonymous pull token for the public repository; it is used once here and never printed
           token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:daturaai/docker-volume-loopback:pull" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
           curl -sI -H "Authorization: Bearer $token" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-            "https://registry-1.docker.io/v2/daturaai/docker-volume-loopback/manifests/${{ inputs.push_tag }}" | grep -i docker-content-digest
+            "https://registry-1.docker.io/v2/daturaai/docker-volume-loopback/manifests/$PUSH_TAG" | grep -i docker-content-digest

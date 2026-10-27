@@ -1,5 +1,21 @@
 # Change Log
 
+## 1.0.0-lium5 - 2026-10-27
+
+### Fixed
+
+- A mount already present at the volume's mount point is handed out only when it sits on a loop
+  device of this volume's data file; anything else there fails the Mount instead of being served
+  and later unmounted as this volume.
+- The `dd` fallback writes the whole rounded size: the tail below one block is written in sectors,
+  not truncated into a hole, so a regular (`sparse=false`) volume reserves all of its space.
+- ext4 volumes are made with 4096-byte blocks; under 512 MB mkfs.ext4 picked 1024-byte blocks,
+  which the 4096-byte-sector loop refuses.
+- A failed autoclear mark after a successful mount is a warning, not a failed Mount: the mount was
+  up without a lease and the device stayed attached until UnMount.
+- Mount logs a warning when the loop device reports direct I/O off (a backing filesystem that
+  refuses O_DIRECT gives a buffered loop behind the same command).
+
 ## 1.0.0-lium4 - 2026-10-27
 
 ### Fixed

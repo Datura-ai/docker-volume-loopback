@@ -232,3 +232,21 @@ func TestMountFromAnotherPluginViewReusesTheLoopDevice(t *testing.T) {
 		})
 	}
 }
+
+func TestMountRefusesAForeignFilesystemAtTheMountPoint(t *testing.T) {
+	// what sits at the mount point must be this volume's own loop: never hand out, and later
+	// unmount, someone else's filesystem
+	m := recoveryManager(t, "xfs")
+	if err := os.Mkdir(filepath.Join(m.mountDir, recoveryVolumeName), 0777); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("mount", "-t", "tmpfs", "none", filepath.Join(m.mountDir, recoveryVolumeName)).CombinedOutput(); err != nil {
+		t.Fatalf("tmpfs: %v: %s", err, output)
+	}
+
+	_, err := m.Mount(context.New(), recoveryVolumeName, "container-one")
+
+	if err == nil || !strings.Contains(err.Error(), "not this volume's") {
+		t.Fatalf("Mount accepted a foreign filesystem at the mount point: %v", err)
+	}
+}

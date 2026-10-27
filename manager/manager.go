@@ -17,7 +17,8 @@ var (
 	NameRegex   = regexp.MustCompile(NamePattern)
 
 	MkFsOptions = map[string][]string{
-		"ext4": {"-F"},
+		// under 512 MB mkfs.ext4 picks 1024-byte blocks, which the 4096-byte-sector loop below refuses
+		"ext4": {"-F", "-b", "4096"},
 		// the feature set xfsprogs 4.19 (the 2019 image) made, so every kernel that mounts
 		// those volumes mounts these: newer mkfs defaults need up to kernel 6.10
 		"xfs": {"-f", "-m", "reflink=0,rmapbt=0,bigtime=0,inobtcount=0",
@@ -401,7 +402,7 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 				// Here we assume that FS is unsupported and will fall back to 'dd' which is slow but should work everywhere
 				of := "of=" + dataFilePath
 				bs := int64(1 << 20)
-				count := sizeInBytes / bs // the tail below one block is added by the truncate after dd
+				count := sizeInBytes / bs // the tail below one block is written in sectors after this dd
 				ctx.
 					Level(context.Trace).
 					Message("attempting creation of a regular data-file with 'dd' exec")
@@ -420,12 +421,19 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 					return
 				}
 
-				// dd wrote whole blocks; the file must still end on a sector boundary (see LoopSectorSize)
-				errStr, err = runCommand(ctx.Derived(), "truncate", "-s", fmt.Sprint(sizeInBytes), dataFilePath)
-				if err != nil {
-					_ = os.Remove(dataFilePath)
-					err = errors.Wrapf(err, "cannot size data-file to whole sectors: %s", errStr)
-					return
+				// the tail below one block, written rather than truncated into place: a regular (sparse=false)
+				// volume reserves all of its rounded size (see LoopSectorSize)
+				if tail := sizeInBytes - count*bs; tail > 0 {
+					errStr, err = runCommand(ctx.Derived(),
+						"dd", "if=/dev/zero", of, fmt.Sprintf("bs=%d", LoopSectorSize),
+						fmt.Sprintf("count=%d", tail/LoopSectorSize),
+						fmt.Sprintf("seek=%d", count*bs/LoopSectorSize), "conv=notrunc",
+					)
+					if err != nil {
+						_ = os.Remove(dataFilePath)
+						err = errors.Wrapf(err, "cannot write the data-file's last sectors: %s", errStr)
+						return
+					}
 				}
 			}
 		}
@@ -585,6 +593,20 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			err = errors.Wrap(err, "cannot check volume mount status")
 			return
 		}
+		if isAlreadyMounted {
+			// only this volume's own filesystem is handed out and torn down from here
+			var belongs bool
+			belongs, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			if err != nil {
+				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
+				return
+			}
+			if !belongs {
+				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
+					volume.MountPointPath)
+				return
+			}
+		}
 	}
 
 	// ensure state dir exists
@@ -702,6 +724,7 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			var fs string
 			fs, err = volume.Fs(ctx.Derived())
 			if err != nil {
+				_ = os.Remove(volume.MountPointPath)
 				err = errors.Wrapf(err, "cannot resolve volume fs to determine mount options")
 				return
 			}
@@ -727,6 +750,15 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				return
 			}
 			loopDevice = strings.TrimSpace(loopDevice)
+
+			// a backing filesystem that refuses O_DIRECT leaves a working buffered loop behind the
+			// same command: say so, since the host page cache is then back
+			if dio, readErr := ioutil.ReadFile("/sys/block/" + filepath.Base(loopDevice) + "/loop/dio"); readErr != nil || strings.TrimSpace(string(dio)) != "1" {
+				ctx.
+					Level(context.Warning).
+					Field("loop-device", loopDevice).
+					Message("direct I/O is not in effect on the loop device")
+			}
 
 			mountFlags := MountOptions[fs]
 
@@ -762,10 +794,13 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			ctx.
 				Level(context.Trace).
 				Message("marking the loop device autoclear")
-			errStr, err = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
-			if err != nil {
-				err = errors.Wrapf(err, "cannot mark loop device '%s' autoclear: %s", loopDevice, errStr)
-				return
+			if errStr, autoclearErr := runCommand(ctx.Derived(), "losetup", "-d", loopDevice); autoclearErr != nil {
+				// the mount is up and UnMount detaches the device itself (`umount -d`): not a failure
+				ctx.
+					Level(context.Warning).
+					Field("loop-device", loopDevice).
+					Field("error", errStr).
+					Message("cannot mark the loop device autoclear; UnMount will detach it")
 			}
 		}
 	}
