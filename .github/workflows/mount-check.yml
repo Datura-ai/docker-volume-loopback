@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       push_tag:
-        description: "build the plugin from this commit and push it to Docker Hub under this tag (e.g. 1.0.0-lium3)"
+        description: "build the plugin from this commit and push it to Docker Hub under this tag (e.g. 1.0.0-lium4)"
         required: true
 env:
   # the published build the dind check installs; bump after a push
-  PLUGIN_TAG: 1.0.0-lium3
+  PLUGIN_TAG: 1.0.0-lium4
 jobs:
   direct-io-loop:
     # the same ground the lium-io e2e stand runs on: a GitHub runner kernel, the plugin's Alpine userland
