@@ -1,5 +1,14 @@
 # Change Log
 
+## 1.0.0-lium4 - 2026-10-27
+
+### Fixed
+
+- Mount attaches the image with `losetup --nooverlap`, so an image that already has a loop device
+  gets that device back, as the implicit loop of `mount` gave it. Without it a Mount that did not
+  see the first kernel mount (a restarted plugin whose mount view was lost) put a second
+  filesystem instance on the same image.
+
 ## 1.0.0-lium3 - 2026-10-27
 
 ### Fixed

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ashald/docker-volume-loopback/context"
@@ -201,5 +202,33 @@ func TestMountVolumeWhoseSizeIsNotASectorMultiple(t *testing.T) {
 		if err := m.UnMount(context.New(), recoveryVolumeName, "container-one"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestMountFromAnotherPluginViewReusesTheLoopDevice(t *testing.T) {
+	// a restarted plugin that does not see the first kernel mount must not put a second
+	// filesystem instance on the same image
+	for _, fs := range []string{"ext4", "xfs"} {
+		t.Run(fs, func(t *testing.T) {
+			m := recoveryManager(t, fs)
+			path := mountRecoveryVolume(t, m, "container-one")
+			writeRecoveryMarker(t, path)
+
+			other := Manager{dataDir: m.dataDir, stateDir: m.stateDir, mountDir: t.TempDir()}
+			t.Cleanup(func() {
+				exec.Command("umount", filepath.Join(other.mountDir, recoveryVolumeName)).Run()
+			})
+			otherPath := mountRecoveryVolume(t, other, "container-two")
+
+			assertRecoveryMarker(t, otherPath)
+			devices, err := exec.Command("losetup", "--noheadings", "--output", "NAME",
+				"--associated", filepath.Join(m.dataDir, recoveryVolumeName)).CombinedOutput()
+			if err != nil {
+				t.Fatalf("losetup: %v: %s", err, devices)
+			}
+			if lines := strings.Fields(string(devices)); len(lines) != 1 {
+				t.Fatalf("the image has %d loop devices, want 1: %s", len(lines), devices)
+			}
+		})
 	}
 }

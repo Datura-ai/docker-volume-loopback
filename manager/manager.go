@@ -29,8 +29,11 @@ var (
 	// Direct I/O bypasses the host page cache for the image file: the volume's unwritten data lives
 	// only in the volume's own filesystem and disappears when its files are unlinked, instead of being
 	// flushed to disk by every overlay unmount on the host. 4096-byte sectors align with any backing
-	// filesystem; without them direct I/O is EINVAL on hosts with 4K-sector disks.
-	LoopOptions = []string{"--direct-io=on", "--sector-size", "4096"}
+	// filesystem; without them direct I/O is EINVAL on hosts with 4K-sector disks. --nooverlap
+	// returns the loop device an image already has, as the implicit loop of `mount` did: a second
+	// Mount that does not see the first kernel mount (a restarted plugin) then shares one superblock
+	// instead of putting a second filesystem instance on the same image.
+	LoopOptions = []string{"--direct-io=on", "--sector-size", "4096", "--nooverlap"}
 	// the --sector-size above: a data file is sized in whole sectors, since the loop device drops a
 	// partial last sector and the read error there makes blkid blind to the filesystem
 	LoopSectorSize = int64(4096)

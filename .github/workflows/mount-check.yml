@@ -26,8 +26,10 @@ jobs:
             truncate -s 512M /tmp/img
             mkfs.xfs -f -m reflink=0,rmapbt=0,bigtime=0,inobtcount=0 -i nrext64=0,exchange=0 -n parent=0 -s size=4096 /tmp/img >/dev/null && echo mkfs_ok
             file -s /tmp/img
-            dev=$(losetup --direct-io=on --sector-size 4096 --find --show /tmp/img); echo "dev=$dev"
+            dev=$(losetup --direct-io=on --sector-size 4096 --nooverlap --find --show /tmp/img); echo "dev=$dev"
             losetup -l "$dev"
+            again=$(losetup --direct-io=on --sector-size 4096 --nooverlap --find --show /tmp/img); echo "again=$again"
+            test "$again" = "$dev" && echo nooverlap_reuses_ok || { echo nooverlap_gave_a_second_device; exit 1; }
             blkid -p "$dev" || echo "blkid_exit=$?"
             mkdir -p /mnt/t
             mount -o nouuid "$dev" /mnt/t && { echo mount_auto_ok; umount /mnt/t; } || echo "mount_auto_exit=$?"
