@@ -23,8 +23,9 @@ testFallbackToDdFromFallocateOnUnsupportedFs() {
 
 testFallbackToDdReservesTheWholeRoundedSize() {
     local volume allocated_size
-    # setup: a decimal size that is not a multiple of the 1 MiB dd block nor of a 4096-byte sector
-    volume=$(docker volume create -d "${DRIVER}" -o fs=xfs -o sparse=false -o size=100MB 2>&1)
+    # setup: a decimal size that is not a multiple of the 1 MiB dd block nor of a 4096-byte sector;
+    # ext4, since mkfs.xfs refuses a filesystem under 300 MB and the rounding does not depend on the fs
+    volume=$(docker volume create -d "${DRIVER}" -o fs=ext4 -o sparse=false -o size=100MB 2>&1)
 
     allocated_size="$(($(run stat -c '%b %B' "${DATA_DIR}/${volume}" | tr ' ' '*')))"
 

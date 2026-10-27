@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ashald/docker-volume-loopback/context"
 )
@@ -253,10 +254,18 @@ func TestMountFailsWhenTheLoopHasNoDirectIO(t *testing.T) {
 			if err == nil || result != "" || !strings.Contains(err.Error(), "direct I/O") {
 				t.Fatalf("Mount handed out a loop without direct I/O: path %q, error %v", result, err)
 			}
-			devices, losetupErr := exec.Command("losetup", "--noheadings", "--output", "NAME",
-				"--associated", filepath.Join(m.dataDir, recoveryVolumeName)).CombinedOutput()
-			if losetupErr != nil || strings.TrimSpace(string(devices)) != "" {
-				t.Fatalf("the image kept a loop device: %v: %s", losetupErr, devices)
+			// the kernel clears a detached loop device asynchronously: give it a moment
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				devices, losetupErr := exec.Command("losetup", "--noheadings", "--output", "NAME",
+					"--associated", filepath.Join(m.dataDir, recoveryVolumeName)).CombinedOutput()
+				if losetupErr == nil && strings.TrimSpace(string(devices)) == "" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the image kept a loop device: %v: %s", losetupErr, devices)
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
 			if _, statErr := os.Stat(filepath.Join(m.mountDir, recoveryVolumeName)); !os.IsNotExist(statErr) {
 				t.Fatalf("the mount point was left behind: %v", statErr)
