@@ -735,6 +735,17 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				return
 			}
 
+			// a loop left by a plugin killed before its mount would otherwise be reused by --nooverlap
+			ctx.
+				Level(context.Trace).
+				Message("detaching loop devices of the data file that back no mount")
+			if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
+				ctx.
+					Level(context.Warning).
+					Field("error", strayErr).
+					Message("cannot detach stray loop devices; mounting anyway")
+			}
+
 			ctx.
 				Level(context.Trace).
 				Field("loop-options", LoopOptions).
@@ -941,6 +952,16 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 				err = errors.Wrapf(err, "cannot remove mount point dir '%s'", volume.MountPointPath)
 				return
 			}
+
+			ctx.
+				Level(context.Trace).
+				Message("detaching loop devices of the data file that back no mount")
+			if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
+				ctx.
+					Level(context.Warning).
+					Field("error", strayErr).
+					Message("cannot detach stray loop devices; the volume is un-mounted")
+			}
 		}
 	}
 
@@ -1014,6 +1035,19 @@ func (m Manager) Delete(ctx *context.Context, name string) (err error) {
 		if isMounted {
 			err = errors.Wrap(err, "volume still in use")
 			return
+		}
+	}
+
+	// detach what a killed plugin left attached: an unlinked data file keeps its loop device alive
+	{
+		ctx.
+			Level(context.Trace).
+			Message("detaching loop devices of the data file that back no mount")
+		if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
+			ctx.
+				Level(context.Warning).
+				Field("error", strayErr).
+				Message("cannot detach stray loop devices; deleting anyway")
 		}
 	}
 

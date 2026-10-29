@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ashald/docker-volume-loopback/context"
 )
 
 func TestIsMountPoint(t *testing.T) {
@@ -96,6 +98,49 @@ func TestMountBelongsToDataFileReadsTheSourceFromStdoutOnly(t *testing.T) {
 			}
 			if tt.wantError && !strings.Contains(err.Error(), "cannot read mount table") {
 				t.Fatalf("error does not carry findmnt's stderr: %v", err)
+			}
+		})
+	}
+}
+
+func TestDetachStrayLoopsDetachesOnlyTheUnmountedDevices(t *testing.T) {
+	tests := []struct {
+		name      string
+		losetup   string
+		findmnt   string
+		detached  []string
+		wantError bool
+	}{
+		{name: "no devices", losetup: "exit 0"},
+		{name: "stray device", losetup: "printf '/dev/loop7\\n'", findmnt: "exit 1", detached: []string{"/dev/loop7"}},
+		{name: "mounted device", losetup: "printf '/dev/loop7\\n'", findmnt: "printf '/mnt/v\\n'"},
+		{name: "one of two stray", losetup: "printf '/dev/loop7\\n/dev/loop8\\n'",
+			findmnt: "[ \"$4\" = /dev/loop7 ] && { printf '/mnt/v\\n'; exit 0; }; exit 1", detached: []string{"/dev/loop8"}},
+		{name: "losetup failed", losetup: "echo 'losetup: cannot open' >&2; exit 1", wantError: true},
+		{name: "findmnt failed", losetup: "printf '/dev/loop7\\n'", findmnt: "echo 'cannot read mount table' >&2; exit 1", wantError: true},
+		{name: "not a device", losetup: "printf 'junk\\n'", findmnt: "exit 1", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			detachLog := filepath.Join(bin, "detached")
+			// `losetup -d <device>` is logged; every other losetup call runs the case's listing
+			losetup := "if [ \"$1\" = -d ]; then echo \"$2\" >> " + detachLog + "; exit 0; fi\n" + tt.losetup
+			for name, body := range map[string]string{"losetup": losetup, "findmnt": tt.findmnt} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin)
+
+			err := detachStrayLoops(context.New(), "/data/recovery-test")
+
+			if (err != nil) != tt.wantError {
+				t.Fatalf("got err=%v; want error=%v", err, tt.wantError)
+			}
+			logged, _ := os.ReadFile(detachLog)
+			if got := strings.Fields(string(logged)); strings.Join(got, " ") != strings.Join(tt.detached, " ") {
+				t.Fatalf("detached %v; want %v", got, tt.detached)
 			}
 		})
 	}

@@ -127,18 +127,60 @@ func loopDeviceFromLosetup(output string) (string, error) {
 }
 
 func isMountPoint(path string) (bool, error) {
-	data, err := exec.Command("findmnt", "--noheadings", "--raw", "--mountpoint", path, "--output", "TARGET").CombinedOutput()
+	return findmntHasEntry("--mountpoint", path)
+}
+
+func isLoopDeviceMounted(device string) (bool, error) {
+	return findmntHasEntry("--source", device)
+}
+
+// findmntHasEntry reports whether the kernel mount table has an entry for the selector (a mount
+// point or a source device); findmnt's exit 1 with nothing printed is "no such mount".
+func findmntHasEntry(selector string, value string) (bool, error) {
+	data, err := exec.Command("findmnt", "--noheadings", "--raw", selector, value, "--output", "TARGET").Output()
 	output := strings.TrimSpace(string(data))
 	if err == nil {
 		if output == "" {
-			return false, errors.Errorf("findmnt returned no mount information for '%s'", path)
+			return false, errors.Errorf("findmnt returned no mount information for '%s'", value)
 		}
 		return true, nil
 	}
-	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 && output == "" {
-		return false, nil
+	detail := ""
+	if exit, ok := err.(*exec.ExitError); ok {
+		detail = strings.TrimSpace(string(exit.Stderr))
+		if exit.ExitCode() == 1 && output == "" && detail == "" {
+			return false, nil
+		}
 	}
-	return false, errors.Wrapf(err, "cannot check kernel mount state at '%s': %s", path, output)
+	return false, errors.Wrapf(err, "cannot check kernel mount state for '%s': %s", value, detail)
+}
+
+// detachStrayLoops detaches the loop devices of dataFilePath that back no mount: a plugin killed
+// between `losetup --find --show` and `mount` leaves one attached without autoclear, and nothing
+// else frees it (UnMount has no mount to `umount -d`, Delete removes the file only). Mounted
+// devices stay, whoever mounted them.
+func detachStrayLoops(ctx *context.Context, dataFilePath string) error {
+	devices, err := runCommandStdout(ctx.Derived(), "losetup", "--noheadings", "--output", "NAME",
+		"--associated", dataFilePath)
+	if err != nil {
+		return errors.Wrapf(err, "cannot list the loop devices of '%s'", dataFilePath)
+	}
+	for _, device := range strings.Fields(devices) {
+		if !loopDevicePattern.MatchString(device) {
+			return errors.Errorf("losetup listed something that is not a loop device: %q", device)
+		}
+		mounted, err := isLoopDeviceMounted(device)
+		if err != nil {
+			return err
+		}
+		if mounted {
+			continue
+		}
+		if errStr, err := runCommand(ctx.Derived(), "losetup", "-d", device); err != nil {
+			return errors.Wrapf(err, "cannot detach the stray loop device '%s': %s", device, errStr)
+		}
+	}
+	return nil
 }
 
 // mountBelongsToDataFile reports whether the filesystem mounted at mountPoint sits on a loop
