@@ -38,3 +38,30 @@ func TestIsMountPoint(t *testing.T) {
 		})
 	}
 }
+
+func TestLoopDeviceFromLosetupTakesTheDevicePathOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		output string
+		want   string
+		fails  bool
+	}{
+		"plain":            {output: "/dev/loop7\n", want: "/dev/loop7"},
+		"warning first":    {output: "losetup: /data/v.img: Warning: file does not fit into a 4096-byte sector\n/dev/loop12", want: "/dev/loop12"},
+		"empty":            {output: "", fails: true},
+		"not a device":     {output: "losetup: cannot find an unused loop device", fails: true},
+		"device then junk": {output: "/dev/loop3\nsomething else", fails: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := loopDeviceFromLosetup(tc.output)
+			if tc.fails {
+				if err == nil {
+					t.Fatalf("accepted %q as %q", tc.output, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}

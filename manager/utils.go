@@ -4,6 +4,7 @@ import (
 	"github.com/ashald/docker-volume-loopback/context"
 	"github.com/pkg/errors"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -72,6 +73,57 @@ func runCommand(ctx *context.Context, name string, args ...string) (output strin
 	output = strings.TrimSpace(string(outBytes[:]))
 
 	return
+}
+
+var loopDevicePattern = regexp.MustCompile(`^/dev/loop[0-9]+$`)
+
+// runCommandStdout is runCommand for a command whose stdout is consumed as a value: stderr is kept
+// out of the result and only quoted in the error. losetup prints its warnings on stderr while still
+// succeeding, and with CombinedOutput they landed in front of the device path.
+func runCommandStdout(ctx *context.Context, name string, args ...string) (output string, err error) {
+	ctx = ctx.
+		Field(":func", "manager/runCommandStdout")
+
+	ctx.
+		Level(context.Debug).
+		Field(":param/name", name).
+		Field(":param/args", args).
+		Message("invoked")
+
+	defer func() {
+		if err != nil {
+			ctx.
+				Level(context.Error).
+				Field(":return/err", err).
+				Message("failed with an error")
+			return
+		} else {
+			ctx.
+				Level(context.Debug).
+				Field(":return/output", output).
+				Message("finished")
+		}
+	}()
+
+	outBytes, err := exec.Command(name, args...).Output()
+	output = strings.TrimSpace(string(outBytes))
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		err = errors.Wrapf(err, "%s", strings.TrimSpace(string(exitErr.Stderr)))
+	}
+
+	return
+}
+
+// loopDeviceFromLosetup takes the device path out of `losetup --find --show` stdout: the last
+// non-empty line, which must be a plain /dev/loopN, so that a later `losetup -d` and `mount` never
+// receive anything else.
+func loopDeviceFromLosetup(output string) (string, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	device := strings.TrimSpace(lines[len(lines)-1])
+	if !loopDevicePattern.MatchString(device) {
+		return "", errors.Errorf("losetup did not print a loop device: %q", output)
+	}
+	return device, nil
 }
 
 func isMountPoint(path string) (bool, error) {

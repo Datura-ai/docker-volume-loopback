@@ -1,5 +1,13 @@
 # Change Log
 
+## 1.0.0-lium7 - 2026-10-29
+
+### Fixed
+
+- The loop device is read from `losetup --find --show` stdout only and must be a plain `/dev/loopN`:
+  a warning losetup printed on stderr while succeeding used to be glued in front of the path, so the
+  cleanup `losetup -d` and the `mount` received a multi-line string.
+
 ## 1.0.0-lium6 - 2026-10-27
 
 ### Fixed

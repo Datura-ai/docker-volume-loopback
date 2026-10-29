@@ -739,11 +739,14 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				Level(context.Trace).
 				Field("loop-options", LoopOptions).
 				Message("attaching data file to a loop device")
-			var loopDevice string
-			loopDevice, err = runCommand(ctx.Derived(),
+			var losetupOutput, loopDevice string
+			losetupOutput, err = runCommandStdout(ctx.Derived(),
 				"losetup",
 				append(append([]string{}, LoopOptions...), "--find", "--show", volume.DataFilePath)...,
 			)
+			if err == nil {
+				loopDevice, err = loopDeviceFromLosetup(losetupOutput)
+			}
 			if err != nil {
 				ctx.
 					Level(context.Trace).
@@ -751,11 +754,10 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				_ = os.Remove(volume.MountPointPath)
 
 				err = errors.Wrapf(err,
-					"cannot attach data file '%s' to a loop device: %s",
-					volume.DataFilePath, loopDevice)
+					"cannot attach data file '%s' to a loop device",
+					volume.DataFilePath)
 				return
 			}
-			loopDevice = strings.TrimSpace(loopDevice)
 
 			// a backing filesystem that refuses O_DIRECT leaves a working buffered loop behind the
 			// same command, and a buffered loop brings the host page cache back: the Mount fails
