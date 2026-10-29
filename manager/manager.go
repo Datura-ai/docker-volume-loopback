@@ -839,6 +839,18 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 	return
 }
 
+// removeStateDir drops the volume's final lease once no kernel mount is left for it
+func removeStateDir(ctx *context.Context, volume Volume) error {
+	ctx.
+		Level(context.Trace).
+		Field("state-dir", volume.StateDir).
+		Message("removing volume's state-dir because it is not mounted anywhere else")
+	if err := os.RemoveAll(volume.StateDir); err != nil {
+		return errors.Wrapf(err, "cannot remove state dir '%s'", volume.StateDir)
+	}
+	return nil
+}
+
 func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err error) {
 	// tracing
 	ctx = ctx.
@@ -891,35 +903,53 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 		}
 	}
 
-	// delete lease file
+	// check the lease file
+	leaseFile := filepath.Join(volume.StateDir, lease)
 	var leaseMissing bool
 	{
-		leaseFile := filepath.Join(volume.StateDir, lease)
 		ctx.
 			Level(context.Trace).
 			Field("lease-file", leaseFile).
-			Message("removing lease-file")
-		err = os.Remove(leaseFile)
-		// a retry after a Mount interrupted between attach and mount, or after this very call
-		// failed, has no lease left: it still gets to the cleanup below, never to a kernel mount
+			Message("checking lease-file")
+		_, err = os.Stat(leaseFile)
+		// a retry after a Mount interrupted between attach and mount has no lease: it still gets
+		// to the cleanup below, never to a kernel mount
 		leaseMissing = os.IsNotExist(err)
 		if err != nil && !leaseMissing {
-			err = errors.Wrapf(err, "cannot remove lease file '%s'", lease)
+			err = errors.Wrapf(err, "cannot stat lease file '%s'", lease)
 			return
 		}
 		err = nil
 	}
 
-	// check other usage
+	// check other usage; only a non-final lease is removed here: the final one stays until the
+	// kernel mount is gone, so a failed inspection or umount leaves the lease a retry needs
 	var isMountedAnywhereElse bool
 	{
 		ctx.
 			Level(context.Trace).
 			Message("checking if volume is mounted anywhere else")
-		isMountedAnywhereElse, err = volume.IsMounted(ctx.Derived())
-		if err != nil {
-			err = errors.Wrapf(err, "cannot figure out if volume is used anywhere else", lease)
+		var leaseFiles []os.FileInfo
+		leaseFiles, err = ioutil.ReadDir(volume.StateDir)
+		if err != nil && !os.IsNotExist(err) {
+			err = errors.Wrap(err, "cannot figure out if volume is used anywhere else")
 			return
+		}
+		err = nil
+		for _, leaseFileInfo := range leaseFiles {
+			isMountedAnywhereElse = isMountedAnywhereElse || leaseFileInfo.Name() != lease
+		}
+		if isMountedAnywhereElse {
+			ctx.
+				Level(context.Trace).
+				Field("lease-file", leaseFile).
+				Message("removing lease-file")
+			err = os.Remove(leaseFile)
+			if err != nil && !os.IsNotExist(err) {
+				err = errors.Wrapf(err, "cannot remove lease file '%s'", lease)
+				return
+			}
+			err = nil
 		}
 	}
 
@@ -941,16 +971,6 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 				return
 			}
 
-			ctx.
-				Level(context.Trace).
-				Field("state-dir", volume.StateDir).
-				Message("removing volume's state-dir because it is not mounted anywhere else")
-			err = os.RemoveAll(volume.StateDir)
-			if err != nil {
-				err = errors.Wrapf(err, "cannot remove its state dir", lease)
-				return
-			}
-
 			if !isMounted {
 				// a Mount killed between attach and mount left a loop device and an empty
 				// mount-point dir; umount has nothing to do, and a RemoveAll here could eat files
@@ -967,7 +987,7 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 					err = errors.Wrapf(err, "cannot remove mount point dir '%s'", volume.MountPointPath)
 					return
 				}
-				err = nil
+				err = removeStateDir(ctx.Derived(), volume)
 				return
 			}
 
@@ -981,6 +1001,10 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 				err = errors.Wrapf(err,
 					"cannot un-mount data file '%s' from '%s': %s",
 					volume.DataFilePath, volume.MountPointPath, errStr)
+				return
+			}
+			err = removeStateDir(ctx.Derived(), volume)
+			if err != nil {
 				return
 			}
 			ctx.

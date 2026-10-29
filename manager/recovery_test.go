@@ -146,3 +146,93 @@ func TestUnMountKeepsAnUnmountedMountDirThatHoldsFiles(t *testing.T) {
 		t.Fatalf("the orphan loop was not detached first (detaches=%d)", state.detaches)
 	}
 }
+
+// mountedFinalLease is a volume Docker mounted for one container: the fake findmnt reports the
+// mount point while the "mounted" marker exists and fails while "findmnt-broken" exists; the fake
+// umount fails while "umount-broken" exists and otherwise drops the marker.
+func mountedFinalLease(t *testing.T) (state *interruptedAttach, root string) {
+	t.Helper()
+	state = newInterruptedAttach(t, "container-one")
+	root = filepath.Dir(state.manager.dataDir)
+	mountPoint := filepath.Join(state.manager.mountDir, interruptedVolumeName)
+	for path, body := range map[string]string{
+		filepath.Join(root, "mounted"): "",
+		filepath.Join(root, "findmnt"): "#!/bin/sh\n[ -e " + root + "/findmnt-broken ] && { echo 'findmnt: cannot read mountinfo' >&2; exit 2; }\n" +
+			"case \"$*\" in *--mountpoint*) [ -e " + root + "/mounted ] && { echo " + mountPoint + "; exit 0; } ;; esac\nexit 1\n",
+		filepath.Join(root, "umount"): "#!/bin/sh\n[ -e " + root + "/umount-broken ] && { echo 'umount: target is busy' >&2; exit 32; }\n/bin/rm -f " + root + "/mounted\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return state, root
+}
+
+func TestUnMountKeepsTheFinalLeaseWhenTheMountInspectionFails(t *testing.T) {
+	state, root := mountedFinalLease(t)
+	if err := os.WriteFile(filepath.Join(root, "findmnt-broken"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err == nil {
+		t.Fatal("UnMount succeeded although findmnt failed")
+	}
+	if _, err := os.Stat(filepath.Join(state.manager.stateDir, interruptedVolumeName, "container-one")); err != nil {
+		t.Fatalf("the final lease is gone after a failed inspection: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "findmnt-broken")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mounted")); !os.IsNotExist(err) {
+		t.Fatalf("the retry left the volume mounted: %v", err)
+	}
+}
+
+func TestUnMountKeepsTheFinalLeaseWhenUmountFails(t *testing.T) {
+	state, root := mountedFinalLease(t)
+	if err := os.WriteFile(filepath.Join(root, "umount-broken"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err == nil {
+		t.Fatal("UnMount succeeded although umount failed")
+	}
+	if _, err := os.Stat(filepath.Join(state.manager.stateDir, interruptedVolumeName, "container-one")); err != nil {
+		t.Fatalf("the final lease is gone after a failed umount: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "umount-broken")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mounted")); !os.IsNotExist(err) {
+		t.Fatalf("the retry left the volume mounted: %v", err)
+	}
+}
+
+func TestUnMountDropsANonFinalLeaseWithoutInspectingTheMount(t *testing.T) {
+	state, root := mountedFinalLease(t)
+	if err := os.WriteFile(filepath.Join(state.manager.stateDir, interruptedVolumeName, "container-two"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "findmnt-broken"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err != nil {
+		t.Fatalf("UnMount of a non-final lease failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(state.manager.stateDir, interruptedVolumeName, "container-one")); !os.IsNotExist(err) {
+		t.Fatalf("the non-final lease was kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mounted")); err != nil {
+		t.Fatalf("the volume was un-mounted under another lease: %v", err)
+	}
+}
