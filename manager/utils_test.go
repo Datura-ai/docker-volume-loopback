@@ -3,6 +3,7 @@ package manager
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,40 @@ func TestLoopDeviceFromLosetupTakesTheDevicePathOnly(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMountBelongsToDataFileReadsTheSourceFromStdoutOnly(t *testing.T) {
+	tests := []struct {
+		name      string
+		findmnt   string
+		belongs   bool
+		wantError bool
+	}{
+		{name: "same device", findmnt: "printf '/dev/loop7\\n'", belongs: true},
+		{name: "warning on stderr", findmnt: "echo 'findmnt: some warning' >&2; printf '/dev/loop7\\n'", belongs: true},
+		{name: "foreign device", findmnt: "printf '/dev/loop8\\n'"},
+		{name: "findmnt failed", findmnt: "echo 'cannot read mount table' >&2; exit 1", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			for name, body := range map[string]string{"findmnt": tt.findmnt, "losetup": "printf '/dev/loop7\\n'"} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin)
+
+			belongs, err := mountBelongsToDataFile("/mnt/recovery-test", "/data/recovery-test")
+
+			if belongs != tt.belongs || (err != nil) != tt.wantError {
+				t.Fatalf("got belongs=%v, err=%v; want belongs=%v, error=%v", belongs, err, tt.belongs, tt.wantError)
+			}
+			if tt.wantError && !strings.Contains(err.Error(), "cannot read mount table") {
+				t.Fatalf("error does not carry findmnt's stderr: %v", err)
 			}
 		})
 	}
