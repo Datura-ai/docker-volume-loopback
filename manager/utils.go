@@ -3,9 +3,11 @@ package manager
 import (
 	"github.com/ashald/docker-volume-loopback/context"
 	"github.com/pkg/errors"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 func validateName(ctx *context.Context, name string) (err error) {
@@ -155,11 +157,74 @@ func findmntHasEntry(selector string, value string) (bool, error) {
 	return false, errors.Wrapf(err, "cannot check kernel mount state for '%s': %s", value, detail)
 }
 
+// fileIdentity is what the kernel records for a loop device's backing file: its filesystem and inode.
+type fileIdentity struct {
+	Device uint64
+	Inode  uint64
+}
+
+func fileIdentityOf(path string) (fileIdentity, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fileIdentity{}, errors.Errorf("cannot stat '%s'", path)
+	}
+	return fileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
+}
+
+// loopDevice is an open loop device: its backing file is read and the device detached through the
+// one descriptor, so the loop number cannot be freed and given to another image in between.
+type loopDevice interface {
+	BackingFile() (fileIdentity, error)
+	Detach() error
+	Close() error
+}
+
+var errLoopDeviceFree = errors.New("the loop device has no backing file")
+
+// replaced in tests: there is no loop device to open on a developer machine
+var openLoopDevice = openLoopDeviceIoctl
+
+// detachLoopIfBackedBy detaches device only if it is still backed by the given file: `losetup -d`
+// trusts the device name, and between a listing and the detach autoclear can free the number and
+// another process attach its own image to it.
+func detachLoopIfBackedBy(device string, backing fileIdentity) (bool, error) {
+	handle, err := openLoopDevice(device)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, errors.Wrapf(err, "cannot open the loop device '%s'", device)
+	}
+	defer handle.Close()
+	attached, err := handle.BackingFile()
+	if err == errLoopDeviceFree {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.Wrapf(err, "cannot read the backing file of '%s'", device)
+	}
+	if attached != backing {
+		return false, nil
+	}
+	if err := handle.Detach(); err != nil {
+		return false, errors.Wrapf(err, "cannot detach the stray loop device '%s'", device)
+	}
+	return true, nil
+}
+
 // detachStrayLoops detaches the loop devices of dataFilePath that back no mount: a plugin killed
 // between `losetup --find --show` and `mount` leaves one attached without autoclear, and nothing
 // else frees it (UnMount has no mount to `umount -d`, Delete removes the file only). Mounted
 // devices stay, whoever mounted them.
 func detachStrayLoops(ctx *context.Context, dataFilePath string) error {
+	backing, err := fileIdentityOf(dataFilePath)
+	if err != nil {
+		return errors.Wrapf(err, "cannot identify the data file '%s'", dataFilePath)
+	}
 	devices, err := runCommandStdout(ctx.Derived(), "losetup", "--noheadings", "--output", "NAME",
 		"--associated", dataFilePath)
 	if err != nil {
@@ -176,9 +241,15 @@ func detachStrayLoops(ctx *context.Context, dataFilePath string) error {
 		if mounted {
 			continue
 		}
-		if errStr, err := runCommand(ctx.Derived(), "losetup", "-d", device); err != nil {
-			return errors.Wrapf(err, "cannot detach the stray loop device '%s': %s", device, errStr)
+		detached, err := detachLoopIfBackedBy(device, backing)
+		if err != nil {
+			return err
 		}
+		ctx.
+			Level(context.Debug).
+			Field("loop-device", device).
+			Field("detached", detached).
+			Message("checked a loop device of the data file that backs no mount")
 	}
 	return nil
 }

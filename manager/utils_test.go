@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,62 @@ func TestMountBelongsToDataFileReadsTheSourceFromStdoutOnly(t *testing.T) {
 	}
 }
 
+// fakeLoopDevice stands in for an open /dev/loopN: what LOOP_GET_STATUS64 would answer, and
+// whether LOOP_CLR_FD was issued on the same handle before it was closed
+type fakeLoopDevice struct {
+	backing   fileIdentity
+	statusErr error
+	detachErr error
+	detached  *bool
+	closed    *bool
+}
+
+func (d fakeLoopDevice) BackingFile() (fileIdentity, error) { return d.backing, d.statusErr }
+func (d fakeLoopDevice) Detach() error                      { *d.detached = true; return d.detachErr }
+func (d fakeLoopDevice) Close() error                       { *d.closed = true; return nil }
+
+func TestDetachLoopIfBackedByDetachesOnlyTheVerifiedBackingFile(t *testing.T) {
+	ours := fileIdentity{Device: 2049, Inode: 301}
+	tests := []struct {
+		name         string
+		device       fakeLoopDevice
+		openErr      error
+		wantDetached bool
+		wantError    bool
+	}{
+		{name: "ours", device: fakeLoopDevice{backing: ours}, wantDetached: true},
+		// the number was freed and given to another image between the listing and this open
+		{name: "recycled to another image", device: fakeLoopDevice{backing: fileIdentity{Device: 2049, Inode: 302}}},
+		{name: "freed meanwhile", device: fakeLoopDevice{statusErr: errLoopDeviceFree}},
+		{name: "device node gone", openErr: os.ErrNotExist},
+		{name: "open refused", openErr: errors.New("permission denied"), wantError: true},
+		{name: "status failed", device: fakeLoopDevice{statusErr: errors.New("ioctl failed")}, wantError: true},
+		{name: "detach failed", device: fakeLoopDevice{backing: ours, detachErr: errors.New("busy")}, wantDetached: true, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var detached, closed bool
+			tt.device.detached, tt.device.closed = &detached, &closed
+			openLoopDevice = func(string) (loopDevice, error) {
+				if tt.openErr != nil {
+					return nil, tt.openErr
+				}
+				return tt.device, nil
+			}
+			t.Cleanup(func() { openLoopDevice = openLoopDeviceIoctl })
+
+			ok, err := detachLoopIfBackedBy("/dev/loop7", ours)
+
+			if (err != nil) != tt.wantError || detached != tt.wantDetached || ok != (tt.wantDetached && err == nil) {
+				t.Fatalf("got ok=%v err=%v detached=%v; want detached=%v error=%v", ok, err, detached, tt.wantDetached, tt.wantError)
+			}
+			if tt.openErr == nil && !closed {
+				t.Fatal("the loop device handle was not closed")
+			}
+		})
+	}
+}
+
 func TestDetachStrayLoopsDetachesOnlyTheUnmountedDevices(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -123,24 +180,34 @@ func TestDetachStrayLoopsDetachesOnlyTheUnmountedDevices(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bin := t.TempDir()
-			detachLog := filepath.Join(bin, "detached")
-			// `losetup -d <device>` is logged; every other losetup call runs the case's listing
-			losetup := "if [ \"$1\" = -d ]; then echo \"$2\" >> " + detachLog + "; exit 0; fi\n" + tt.losetup
-			for name, body := range map[string]string{"losetup": losetup, "findmnt": tt.findmnt} {
+			for name, body := range map[string]string{"losetup": tt.losetup, "findmnt": tt.findmnt} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
 			}
 			t.Setenv("PATH", bin)
+			dataFile := filepath.Join(t.TempDir(), "recovery-test")
+			if err := os.WriteFile(dataFile, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			backing, err := fileIdentityOf(dataFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var detached []string
+			openLoopDevice = func(device string) (loopDevice, error) {
+				detached = append(detached, device)
+				return fakeLoopDevice{backing: backing, detached: new(bool), closed: new(bool)}, nil
+			}
+			t.Cleanup(func() { openLoopDevice = openLoopDeviceIoctl })
 
-			err := detachStrayLoops(context.New(), "/data/recovery-test")
+			err = detachStrayLoops(context.New(), dataFile)
 
 			if (err != nil) != tt.wantError {
 				t.Fatalf("got err=%v; want error=%v", err, tt.wantError)
 			}
-			logged, _ := os.ReadFile(detachLog)
-			if got := strings.Fields(string(logged)); strings.Join(got, " ") != strings.Join(tt.detached, " ") {
-				t.Fatalf("detached %v; want %v", got, tt.detached)
+			if strings.Join(detached, " ") != strings.Join(tt.detached, " ") {
+				t.Fatalf("detached %v; want %v", detached, tt.detached)
 			}
 		})
 	}

@@ -892,6 +892,7 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 	}
 
 	// delete lease file
+	var leaseMissing bool
 	{
 		leaseFile := filepath.Join(volume.StateDir, lease)
 		ctx.
@@ -899,10 +900,14 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 			Field("lease-file", leaseFile).
 			Message("removing lease-file")
 		err = os.Remove(leaseFile)
-		if err != nil {
+		// a retry after a Mount interrupted between attach and mount, or after this very call
+		// failed, has no lease left: it still gets to the cleanup below, never to a kernel mount
+		leaseMissing = os.IsNotExist(err)
+		if err != nil && !leaseMissing {
 			err = errors.Wrapf(err, "cannot remove lease file '%s'", lease)
 			return
 		}
+		err = nil
 	}
 
 	// check other usage
@@ -923,11 +928,46 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 		if !isMountedAnywhereElse {
 			ctx.
 				Level(context.Trace).
+				Message("checking if the volume is mounted at its internal mount-point")
+			var isMounted bool
+			isMounted, err = isMountPoint(volume.MountPointPath)
+			if err != nil {
+				err = errors.Wrap(err, "cannot check volume mount status")
+				return
+			}
+			if isMounted && leaseMissing {
+				// a kernel mount nobody holds a lease for is not this call's to tear down
+				err = errors.Errorf("cannot remove lease file '%s': it does not exist", lease)
+				return
+			}
+
+			ctx.
+				Level(context.Trace).
 				Field("state-dir", volume.StateDir).
 				Message("removing volume's state-dir because it is not mounted anywhere else")
 			err = os.RemoveAll(volume.StateDir)
 			if err != nil {
 				err = errors.Wrapf(err, "cannot remove its state dir", lease)
+				return
+			}
+
+			if !isMounted {
+				// a Mount killed between attach and mount left a loop device and an empty
+				// mount-point dir; umount has nothing to do, and a RemoveAll here could eat files
+				ctx.
+					Level(context.Trace).
+					Message("no kernel mount: detaching loop devices of the data file that back no mount")
+				err = detachStrayLoops(ctx.Derived(), volume.DataFilePath)
+				if err != nil {
+					err = errors.Wrapf(err, "cannot detach the loop devices of '%s'", volume.DataFilePath)
+					return
+				}
+				err = os.Remove(volume.MountPointPath)
+				if err != nil && !os.IsNotExist(err) {
+					err = errors.Wrapf(err, "cannot remove mount point dir '%s'", volume.MountPointPath)
+					return
+				}
+				err = nil
 				return
 			}
 
@@ -1038,16 +1078,16 @@ func (m Manager) Delete(ctx *context.Context, name string) (err error) {
 		}
 	}
 
-	// detach what a killed plugin left attached: an unlinked data file keeps its loop device alive
+	// detach what a killed plugin left attached: an unlinked data file keeps its loop device alive,
+	// and no later call could find it by this path, so the image stays for Docker's retry
 	{
 		ctx.
 			Level(context.Trace).
 			Message("detaching loop devices of the data file that back no mount")
-		if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
-			ctx.
-				Level(context.Warning).
-				Field("error", strayErr).
-				Message("cannot detach stray loop devices; deleting anyway")
+		err = detachStrayLoops(ctx.Derived(), volume.DataFilePath)
+		if err != nil {
+			err = errors.Wrapf(err, "cannot detach the loop devices of '%s'", volume.DataFilePath)
+			return
 		}
 	}
 
