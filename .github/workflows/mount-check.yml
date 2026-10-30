@@ -10,7 +10,7 @@ on:
         required: true
 env:
   # the published build the dind check installs; bump after a push
-  PLUGIN_TAG: 1.0.0-lium9
+  PLUGIN_TAG: 1.0.0-lium10
 jobs:
   direct-io-loop:
     # the same ground the lium-io e2e stand runs on: a GitHub runner kernel, the plugin's Alpine userland
