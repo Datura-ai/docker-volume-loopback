@@ -601,13 +601,13 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 		}
 		if isAlreadyMounted {
 			// only this volume's own filesystem is handed out and torn down from here
-			var belongs bool
-			belongs, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			var mountBelongsToVolume bool
+			mountBelongsToVolume, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
 			if err != nil {
 				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
 				return
 			}
-			if !belongs {
+			if !mountBelongsToVolume {
 				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
 					volume.MountPointPath)
 				return
@@ -672,8 +672,8 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			ctx.
 				Level(context.Trace).
 				Message("creating lease-file")
-			var file *os.File
-			file, err = os.Create(leaseFile)
+			var leaseFileHandle *os.File
+			leaseFileHandle, err = os.Create(leaseFile)
 			if err != nil {
 				err = errors.Wrapf(err, "cannot create lease file '%s'", lease)
 				return
@@ -686,7 +686,7 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 					_ = os.Remove(leaseFile)
 				}
 			}()
-			err = file.Close()
+			err = leaseFileHandle.Close()
 			if err != nil {
 				err = errors.Wrapf(err, "cannot close lease file '%s'", lease)
 				return
@@ -713,9 +713,9 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			err = os.Mkdir(volume.MountPointPath, mountPointMode)
 			if os.IsExist(err) {
 				// Reuse only an empty directory left by an interrupted mount.
-				var entries []os.FileInfo
-				entries, err = ioutil.ReadDir(volume.MountPointPath)
-				if err == nil && len(entries) != 0 {
+				var mountDirectoryEntries []os.FileInfo
+				mountDirectoryEntries, err = ioutil.ReadDir(volume.MountPointPath)
+				if err == nil && len(mountDirectoryEntries) != 0 {
 					err = errors.Errorf("mount point dir '%s' is not empty", volume.MountPointPath)
 				}
 			}
@@ -772,8 +772,7 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 
 			// a backing filesystem that refuses O_DIRECT leaves a working buffered loop behind the
 			// same command, and a buffered loop brings the host page cache back: the Mount fails
-			// (the validator's probe then falls back to the buffered plugin) rather than hand out a
-			// volume this generation makes no promise for
+			// rather than hand out a volume this generation makes no promise for
 			if dio, readErr := readLoopDirectIO(loopDevice); readErr != nil || dio != "1" {
 				ctx.
 					Level(context.Trace).
@@ -993,13 +992,13 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 
 			// what sits at the mount point must be this volume's own loop: Mount refused to hand
 			// out someone else's filesystem, and a lease that outlived the mount must not tear it down
-			var belongs bool
-			belongs, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			var mountBelongsToVolume bool
+			mountBelongsToVolume, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
 			if err != nil {
 				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
 				return
 			}
-			if !belongs {
+			if !mountBelongsToVolume {
 				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
 					volume.MountPointPath)
 				return

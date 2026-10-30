@@ -278,8 +278,9 @@ func mountBelongsToDataFile(mountPoint string, dataFilePath string) (bool, error
 		}
 		return false, errors.Wrapf(err, "cannot list the loop devices of '%s': %s", dataFilePath, detail)
 	}
+	mountSource := strings.TrimSpace(string(source))
 	for _, device := range strings.Fields(string(devices)) {
-		if device == strings.TrimSpace(string(source)) {
+		if device == mountSource {
 			return true, nil
 		}
 	}

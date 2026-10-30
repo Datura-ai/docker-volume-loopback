@@ -239,14 +239,14 @@ func TestMountFailsWhenTheLoopHasNoDirectIO(t *testing.T) {
 	// a backing filesystem that refuses O_DIRECT gives a buffered loop behind the same losetup
 	// command, and a buffered loop brings the host page cache back: no volume of this generation
 	// is handed out without direct I/O, and the failed Mount leaves no loop, mount point or lease
-	for name, answer := range map[string]func(string) (string, error){
+	for name, readDirectIOState := range map[string]func(string) (string, error){
 		"off":        func(string) (string, error) { return "0", nil },
 		"unreadable": func(string) (string, error) { return "", errors.New("sysfs not readable") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := recoveryManager(t, "xfs")
 			original := readLoopDirectIO
-			readLoopDirectIO = answer
+			readLoopDirectIO = readDirectIOState
 			t.Cleanup(func() { readLoopDirectIO = original })
 
 			result, err := m.Mount(context.New(), recoveryVolumeName, "container-one")
