@@ -14,7 +14,7 @@ testRegularXfsStatus() {
     status_size_allocated=$(echo "${info}" | jq -r '.["size-allocated"]')
 
     assertEquals "Reported FS check" "xfs" "${status_fs}"
-    assertEquals "Reported max size check" "100000000" "${status_size_max}"
+    assertEquals "Reported max size check" "100003840" "${status_size_max}"
     assertTrue "Reported allocated size check" "[ ${status_size_allocated} -ge 100000000 ]"
 
     # cleanup
@@ -34,7 +34,7 @@ testSparseExt4Status() {
     status_size_allocated=$(echo "${info}" | jq -r '.["size-allocated"]')
 
     assertEquals "Reported FS check" "ext4" "${status_fs}"
-    assertEquals "Reported max size check" "100000000" "${status_size_max}"
+    assertEquals "Reported max size check" "100003840" "${status_size_max}"
     assertTrue "Reported allocated size check" "[ ${status_size_allocated} -lt 100000000 ]"
 
     # cleanup

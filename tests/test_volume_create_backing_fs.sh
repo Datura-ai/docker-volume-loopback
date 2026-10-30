@@ -21,6 +21,21 @@ testFallbackToDdFromFallocateOnUnsupportedFs() {
     docker volume rm "${volume}" > /dev/null
 }
 
+testFallbackToDdReservesTheWholeRoundedSize() {
+    local volume allocated_size
+    # setup: a decimal size that is not a multiple of the 1 MiB dd block nor of a 4096-byte sector;
+    # ext4, since mkfs.xfs refuses a filesystem under 300 MB and the rounding does not depend on the fs
+    ## 50MB: the whole image must fit the 100M ext3 fixture
+    volume=$(docker volume create -d "${DRIVER}" -o fs=ext4 -o sparse=false -o size=50MB 2>&1)
+
+    allocated_size="$(($(run stat -c '%b %B' "${DATA_DIR}/${volume}" | tr ' ' '*')))"
+
+    assertTrue "fallback must reserve the rounded image (50003968 bytes)" "[ ${allocated_size} -ge 50003968 ]"
+
+    # cleanup
+    docker volume rm "${volume}" > /dev/null
+}
+
 testDdFailureScenarioWhenThereIsNotEnoughDiskSpace() {
     local error result count
     # setup
