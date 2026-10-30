@@ -991,6 +991,20 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 				return
 			}
 
+			// what sits at the mount point must be this volume's own loop: Mount refused to hand
+			// out someone else's filesystem, and a lease that outlived the mount must not tear it down
+			var belongs bool
+			belongs, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			if err != nil {
+				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
+				return
+			}
+			if !belongs {
+				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
+					volume.MountPointPath)
+				return
+			}
+
 			ctx.
 				Level(context.Trace).
 				Message("un-mounting volume from its internal mount-point")

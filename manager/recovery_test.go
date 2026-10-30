@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ashald/docker-volume-loopback/context"
@@ -148,8 +149,9 @@ func TestUnMountKeepsAnUnmountedMountDirThatHoldsFiles(t *testing.T) {
 }
 
 // mountedFinalLease is a volume Docker mounted for one container: the fake findmnt reports the
-// mount point while the "mounted" marker exists and fails while "findmnt-broken" exists; the fake
-// umount fails while "umount-broken" exists and otherwise drops the marker.
+// mount point while the "mounted" marker exists (on the volume's /dev/loop7, or on a foreign
+// /dev/loop8 while "foreign" exists) and fails while "findmnt-broken" exists; the fake umount
+// fails while "umount-broken" exists and otherwise drops the marker.
 func mountedFinalLease(t *testing.T) (state *interruptedAttach, root string) {
 	t.Helper()
 	state = newInterruptedAttach(t, "container-one")
@@ -158,7 +160,7 @@ func mountedFinalLease(t *testing.T) (state *interruptedAttach, root string) {
 	for path, body := range map[string]string{
 		filepath.Join(root, "mounted"): "",
 		filepath.Join(root, "findmnt"): "#!/bin/sh\n[ -e " + root + "/findmnt-broken ] && { echo 'findmnt: cannot read mountinfo' >&2; exit 2; }\n" +
-			"case \"$*\" in *--mountpoint*) [ -e " + root + "/mounted ] && { echo " + mountPoint + "; exit 0; } ;; esac\nexit 1\n",
+			"case \"$*\" in *--mountpoint*) [ -e " + root + "/mounted ] && { case \"$*\" in *SOURCE*) [ -e " + root + "/foreign ] && echo /dev/loop8 || echo /dev/loop7 ;; *) echo " + mountPoint + " ;; esac; exit 0; } ;; esac\nexit 1\n",
 		filepath.Join(root, "umount"): "#!/bin/sh\n[ -e " + root + "/umount-broken ] && { echo 'umount: target is busy' >&2; exit 32; }\n/bin/rm -f " + root + "/mounted\n",
 	} {
 		if err := os.WriteFile(path, []byte(body), 0700); err != nil {
@@ -234,5 +236,39 @@ func TestUnMountDropsANonFinalLeaseWithoutInspectingTheMount(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "mounted")); err != nil {
 		t.Fatalf("the volume was un-mounted under another lease: %v", err)
+	}
+}
+
+func TestUnMountLeavesAForeignFilesystemAtTheMountPointAndKeepsTheLease(t *testing.T) {
+	// what sits at the mount point must be this volume's own loop: Mount refuses to hand out
+	// someone else's filesystem, and a lease that outlived the volume's mount must not tear it down
+	state, root := mountedFinalLease(t)
+	if err := os.WriteFile(filepath.Join(root, "foreign"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one")
+
+	if err == nil || !strings.Contains(err.Error(), "not this volume's") {
+		t.Fatalf("UnMount accepted a foreign filesystem at the mount point: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "mounted")); statErr != nil {
+		t.Fatalf("the foreign filesystem was un-mounted: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(state.manager.stateDir, interruptedVolumeName, "container-one")); statErr != nil {
+		t.Fatalf("the lease is gone: %v", statErr)
+	}
+
+	// once the foreign mount is gone, the retry cleans up like any lease without a kernel mount
+	for _, marker := range []string{"foreign", "mounted"} {
+		if err := os.Remove(filepath.Join(root, marker)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(state.manager.stateDir, interruptedVolumeName)); !os.IsNotExist(statErr) {
+		t.Fatalf("the retry left the state dir: %v", statErr)
 	}
 }

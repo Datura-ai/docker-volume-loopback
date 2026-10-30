@@ -294,3 +294,30 @@ func TestMountRefusesAForeignFilesystemAtTheMountPoint(t *testing.T) {
 		t.Fatalf("Mount accepted a foreign filesystem at the mount point: %v", err)
 	}
 }
+
+func TestUnMountRefusesAForeignFilesystemAtTheMountPoint(t *testing.T) {
+	// a lease that outlived the volume's mount must not tear down someone else's filesystem that
+	// sits at the mount point now
+	m := recoveryManager(t, "xfs")
+	if err := os.MkdirAll(filepath.Join(m.stateDir, recoveryVolumeName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.stateDir, recoveryVolumeName, "container-one"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(m.mountDir, recoveryVolumeName), 0777); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("mount", "-t", "tmpfs", "none", filepath.Join(m.mountDir, recoveryVolumeName)).CombinedOutput(); err != nil {
+		t.Fatalf("tmpfs: %v: %s", err, output)
+	}
+
+	err := m.UnMount(context.New(), recoveryVolumeName, "container-one")
+
+	if err == nil || !strings.Contains(err.Error(), "not this volume's") {
+		t.Fatalf("UnMount accepted a foreign filesystem at the mount point: %v", err)
+	}
+	if mounted, mountErr := isMountPoint(filepath.Join(m.mountDir, recoveryVolumeName)); mountErr != nil || !mounted {
+		t.Fatalf("the foreign filesystem was un-mounted: mounted=%v, err=%v", mounted, mountErr)
+	}
+}
