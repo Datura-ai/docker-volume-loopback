@@ -1,5 +1,31 @@
 # Change Log
 
+## 1.0.0-lium9 - 2026-10-29
+
+### Fixed
+
+- UnMount keeps the final lease until the kernel mount is gone: a failed `findmnt` inspection or
+  `umount` leaves the lease, so Docker's retry reaches the umount instead of being refused as a
+  lease-less call while the filesystem stays mounted. A non-final lease is still dropped up front.
+
+## 1.0.0-lium8 - 2026-10-29
+
+### Fixed
+
+- The driver's mutex is locked on the driver itself: the handlers had value receivers, so each
+  request locked a copy and volume requests were never serialised.
+- A loop device a plugin killed between `losetup --find --show` and `mount` left attached to the
+  data file (no autoclear, no kernel mount) is detached: by Mount before it attaches, as
+  `--nooverlap` would hand the stale device back; by UnMount when there is no kernel mount, together
+  with the empty mount-point dir and the state dir; by Delete before it removes the image, which
+  stays when the detach fails, since an unlinked image keeps its loop device alive and no later call
+  can find it by path.
+- A stray loop device is detached only after its backing file is verified through the open device
+  (`LOOP_GET_STATUS64`, then `LOOP_CLR_FD` on the same descriptor): between the listing and a
+  `losetup -d` by name the number can be freed and given to another image.
+- The mount source at the mount point is read from `findmnt` stdout only; a warning on stderr made
+  the volume's own mount read as foreign.
+
 ## 1.0.0-lium7 - 2026-10-29
 
 ### Fixed
