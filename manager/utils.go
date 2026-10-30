@@ -258,7 +258,8 @@ func detachStrayLoops(ctx *context.Context, dataFilePath string) error {
 // device backed by dataFilePath (a same-name volume of another plugin instance, or a foreign
 // mount left at the path, must not be handed out or unmounted as this volume).
 func mountBelongsToDataFile(mountPoint string, dataFilePath string) (bool, error) {
-	// stdout only: a findmnt warning on stderr would be compared as part of the source path
+	// stdout only, for both commands: a warning on stderr would be compared as part of the source
+	// path, or listed as one of the volume's loop devices
 	source, err := exec.Command("findmnt", "--noheadings", "--raw", "--first-only",
 		"--mountpoint", mountPoint, "--output", "SOURCE").Output()
 	if err != nil {
@@ -269,9 +270,13 @@ func mountBelongsToDataFile(mountPoint string, dataFilePath string) (bool, error
 		return false, errors.Wrapf(err, "cannot read the mount source at '%s': %s", mountPoint, detail)
 	}
 	devices, err := exec.Command("losetup", "--noheadings", "--output", "NAME",
-		"--associated", dataFilePath).CombinedOutput()
+		"--associated", dataFilePath).Output()
 	if err != nil {
-		return false, errors.Wrapf(err, "cannot list the loop devices of '%s': %s", dataFilePath, devices)
+		detail := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			detail = string(exitErr.Stderr)
+		}
+		return false, errors.Wrapf(err, "cannot list the loop devices of '%s': %s", dataFilePath, detail)
 	}
 	for _, device := range strings.Fields(string(devices)) {
 		if device == strings.TrimSpace(string(source)) {
