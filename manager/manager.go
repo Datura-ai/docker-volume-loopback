@@ -17,11 +17,32 @@ var (
 	NameRegex   = regexp.MustCompile(NamePattern)
 
 	MkFsOptions = map[string][]string{
-		"ext4": {"-F"},
+		// under 512 MB mkfs.ext4 picks 1024-byte blocks, which the 4096-byte-sector loop below refuses
+		"ext4": {"-F", "-b", "4096"},
 		// the feature set xfsprogs 4.19 (the 2019 image) made, so every kernel that mounts
 		// those volumes mounts these: newer mkfs defaults need up to kernel 6.10
 		"xfs": {"-f", "-m", "reflink=0,rmapbt=0,bigtime=0,inobtcount=0",
-			"-i", "nrext64=0,exchange=0", "-n", "parent=0"},
+			"-i", "nrext64=0,exchange=0", "-n", "parent=0",
+			// the loop device below has 4096-byte sectors; xfs refuses a 512-byte-sector image on it
+			"-s", "size=4096"},
+	}
+
+	// Direct I/O bypasses the host page cache for the image file: the volume's unwritten data lives
+	// only in the volume's own filesystem and disappears when its files are unlinked, instead of being
+	// flushed to disk by every overlay unmount on the host. 4096-byte sectors align with any backing
+	// filesystem; without them direct I/O is EINVAL on hosts with 4K-sector disks. --nooverlap
+	// returns the loop device an image already has, as the implicit loop of `mount` did: a second
+	// Mount that does not see the first kernel mount (a restarted plugin) then shares one superblock
+	// instead of putting a second filesystem instance on the same image.
+	LoopOptions = []string{"--direct-io=on", "--sector-size", "4096", "--nooverlap"}
+	// the --sector-size above: a data file is sized in whole sectors, since the loop device drops a
+	// partial last sector and the read error there makes blkid blind to the filesystem
+	LoopSectorSize = int64(4096)
+	// a function so a test can stand in for sysfs: forcing a real loop without direct I/O needs a
+	// backing filesystem that refuses O_DIRECT
+	readLoopDirectIO = func(loopDevice string) (string, error) {
+		dio, err := ioutil.ReadFile("/sys/block/" + filepath.Base(loopDevice) + "/loop/dio")
+		return strings.TrimSpace(string(dio)), err
 	}
 
 	MountOptions = map[string][]string{
@@ -308,6 +329,7 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 			return errors.Errorf(
 				"requested size '%d' is smaller than minimum allowed 20MB", sizeInBytes)
 		}
+		sizeInBytes = (sizeInBytes + LoopSectorSize - 1) / LoopSectorSize * LoopSectorSize
 
 		// We perform fs validation and construct mkfs flags array on the way
 		ctx.
@@ -385,8 +407,8 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 
 				// Here we assume that FS is unsupported and will fall back to 'dd' which is slow but should work everywhere
 				of := "of=" + dataFilePath
-				bs := int64(1e6)
-				count := sizeInBytes / bs // we lose some precision here but it's likely to be negligible
+				bs := int64(1 << 20)
+				count := sizeInBytes / bs // the tail below one block is written in sectors after this dd
 				ctx.
 					Level(context.Trace).
 					Message("attempting creation of a regular data-file with 'dd' exec")
@@ -403,6 +425,21 @@ func (m Manager) Create(ctx *context.Context, name string, sizeInBytes int64, sp
 					_ = os.Remove(dataFilePath) // Primitive attempt to cleanup
 					err = errors.Wrapf(err, errStr)
 					return
+				}
+
+				// the tail below one block, written rather than truncated into place: a regular (sparse=false)
+				// volume reserves all of its rounded size (see LoopSectorSize)
+				if tail := sizeInBytes - count*bs; tail > 0 {
+					errStr, err = runCommand(ctx.Derived(),
+						"dd", "if=/dev/zero", of, fmt.Sprintf("bs=%d", LoopSectorSize),
+						fmt.Sprintf("count=%d", tail/LoopSectorSize),
+						fmt.Sprintf("seek=%d", count*bs/LoopSectorSize), "conv=notrunc",
+					)
+					if err != nil {
+						_ = os.Remove(dataFilePath)
+						err = errors.Wrapf(err, "cannot write the data-file's last sectors: %s", errStr)
+						return
+					}
 				}
 			}
 		}
@@ -556,10 +593,25 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 		ctx.
 			Level(context.Trace).
 			Message("checking if volume is mounted anywhere else")
-		isAlreadyMounted, err = volume.IsMounted(ctx.Derived()) // checking mount status early before we record a lease
+		// Lease files can survive a plugin restart after the kernel mount is lost.
+		isAlreadyMounted, err = isMountPoint(volume.MountPointPath)
 		if err != nil {
 			err = errors.Wrap(err, "cannot check volume mount status")
 			return
+		}
+		if isAlreadyMounted {
+			// only this volume's own filesystem is handed out and torn down from here
+			var mountBelongsToVolume bool
+			mountBelongsToVolume, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			if err != nil {
+				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
+				return
+			}
+			if !mountBelongsToVolume {
+				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
+					volume.MountPointPath)
+				return
+			}
 		}
 	}
 
@@ -616,27 +668,30 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				return
 			}
 		}
-		if leaseStat != nil {
-			err = errors.Wrapf(err, "lease file '%s' already exists", leaseFile)
-			return
-		}
-
-		ctx.
-			Level(context.Trace).
-			Message("creating lease-file exists")
-		_, err = os.Create(leaseFile)
-		if err != nil {
-			err = errors.Wrapf(err, "cannot create lease file '%s'", lease)
-			return
-		}
-		defer func() {
+		if leaseStat == nil {
+			ctx.
+				Level(context.Trace).
+				Message("creating lease-file")
+			var leaseFileHandle *os.File
+			leaseFileHandle, err = os.Create(leaseFile)
 			if err != nil {
-				ctx.
-					Level(context.Trace).
-					Message("attempting to cleanup lease-file")
-				_ = os.Remove(leaseFile)
+				err = errors.Wrapf(err, "cannot create lease file '%s'", lease)
+				return
 			}
-		}()
+			defer func() {
+				if err != nil {
+					ctx.
+						Level(context.Trace).
+						Message("attempting to cleanup lease-file")
+					_ = os.Remove(leaseFile)
+				}
+			}()
+			err = leaseFileHandle.Close()
+			if err != nil {
+				err = errors.Wrapf(err, "cannot close lease file '%s'", lease)
+				return
+			}
+		}
 	}
 
 	// mount
@@ -656,6 +711,14 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 				Message("creating mount-point")
 
 			err = os.Mkdir(volume.MountPointPath, mountPointMode)
+			if os.IsExist(err) {
+				// Reuse only an empty directory left by an interrupted mount.
+				var mountDirectoryEntries []os.FileInfo
+				mountDirectoryEntries, err = ioutil.ReadDir(volume.MountPointPath)
+				if err == nil && len(mountDirectoryEntries) != 0 {
+					err = errors.Errorf("mount point dir '%s' is not empty", volume.MountPointPath)
+				}
+			}
 			if err != nil {
 				err = errors.Wrapf(err, "cannot create mount point dir '%s'", volume.MountPointPath)
 				return
@@ -667,7 +730,62 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 			var fs string
 			fs, err = volume.Fs(ctx.Derived())
 			if err != nil {
+				_ = os.Remove(volume.MountPointPath)
 				err = errors.Wrapf(err, "cannot resolve volume fs to determine mount options")
+				return
+			}
+
+			// a loop left by a plugin killed before its mount would otherwise be reused by --nooverlap
+			ctx.
+				Level(context.Trace).
+				Message("detaching loop devices of the data file that back no mount")
+			if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
+				ctx.
+					Level(context.Warning).
+					Field("error", strayErr).
+					Message("cannot detach stray loop devices; mounting anyway")
+			}
+
+			ctx.
+				Level(context.Trace).
+				Field("loop-options", LoopOptions).
+				Message("attaching data file to a loop device")
+			var losetupOutput, loopDevice string
+			losetupOutput, err = runCommandStdout(ctx.Derived(),
+				"losetup",
+				append(append([]string{}, LoopOptions...), "--find", "--show", volume.DataFilePath)...,
+			)
+			if err == nil {
+				loopDevice, err = loopDeviceFromLosetup(losetupOutput)
+			}
+			if err != nil {
+				ctx.
+					Level(context.Trace).
+					Message("attempting to cleanup internal mount-point")
+				_ = os.Remove(volume.MountPointPath)
+
+				err = errors.Wrapf(err,
+					"cannot attach data file '%s' to a loop device",
+					volume.DataFilePath)
+				return
+			}
+
+			// a backing filesystem that refuses O_DIRECT leaves a working buffered loop behind the
+			// same command, and a buffered loop brings the host page cache back: the Mount fails
+			// rather than hand out a volume this generation makes no promise for
+			if dio, readErr := readLoopDirectIO(loopDevice); readErr != nil || dio != "1" {
+				ctx.
+					Level(context.Trace).
+					Message("attempting to cleanup loop device and internal mount-point")
+				_, _ = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
+				_ = os.Remove(volume.MountPointPath)
+
+				if readErr != nil {
+					err = errors.Wrapf(readErr, "cannot read the direct I/O state of '%s'", loopDevice)
+				} else {
+					err = errors.Errorf("direct I/O is not in effect on '%s' (dio=%s): the backing filesystem refuses O_DIRECT",
+						loopDevice, dio)
+				}
 				return
 			}
 
@@ -675,30 +793,61 @@ func (m Manager) Mount(ctx *context.Context, name string, lease string) (result 
 
 			ctx.
 				Level(context.Trace).
+				Field("loop-device", loopDevice).
 				Field("mount-flags", mountFlags).
 				Message("mounting volume to its internal mount-point")
 			var errStr string
+			// explicit type: without it mount asks blkid and, when that answers nothing, walks
+			// /proc/filesystems, which lacks xfs on a host that never loaded the module
 			errStr, err = runCommand(ctx.Derived(),
 				"mount",
-				append(mountFlags, volume.DataFilePath, volume.MountPointPath)...,
+				append(append([]string{"-t", fs}, mountFlags...), loopDevice, volume.MountPointPath)...,
 			)
 
 			if err != nil {
 				ctx.
 					Level(context.Trace).
-					Message("attempting to cleanup internal mount-point")
-				_ = os.RemoveAll(volume.MountPointPath)
+					Message("attempting to cleanup loop device and internal mount-point")
+				_, _ = runCommand(ctx.Derived(), "losetup", "-d", loopDevice)
+				_ = os.Remove(volume.MountPointPath)
 
 				err = errors.Wrapf(err,
-					"cannot mount data file '%s' at '%s': %s",
-					volume.DataFilePath, volume.MountPointPath, errStr)
+					"cannot mount data file '%s' (%s) at '%s': %s",
+					volume.DataFilePath, loopDevice, volume.MountPointPath, errStr)
 				return
+			}
+
+			// Detaching a busy loop device only marks it autoclear: the kernel frees it with the
+			// last unmount, as it does for the implicit loop of `mount`, so a mount lost outside
+			// UnMount does not leak the device.
+			ctx.
+				Level(context.Trace).
+				Message("marking the loop device autoclear")
+			if errStr, autoclearErr := runCommand(ctx.Derived(), "losetup", "-d", loopDevice); autoclearErr != nil {
+				// the mount is up and UnMount detaches the device itself (`umount -d`): not a failure
+				ctx.
+					Level(context.Warning).
+					Field("loop-device", loopDevice).
+					Field("error", errStr).
+					Message("cannot mark the loop device autoclear; UnMount will detach it")
 			}
 		}
 	}
 
 	result = volume.MountPointPath
 	return
+}
+
+// removeStateDir drops the volume's final lease once no kernel mount is left for it
+func removeStateDir(ctx *context.Context, volume Volume) error {
+	ctx.
+		Level(context.Trace).
+		Field("state-dir", volume.StateDir).
+		Message("removing volume's state-dir because it is not mounted anywhere else")
+	if err := os.RemoveAll(volume.StateDir); err != nil {
+		return errors.Wrapf(err, "cannot remove state dir '%s'", volume.StateDir)
+	}
+	return nil
 }
 
 func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err error) {
@@ -753,30 +902,53 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 		}
 	}
 
-	// delete lease file
+	// check the lease file
+	leaseFile := filepath.Join(volume.StateDir, lease)
+	var leaseMissing bool
 	{
-		leaseFile := filepath.Join(volume.StateDir, lease)
 		ctx.
 			Level(context.Trace).
 			Field("lease-file", leaseFile).
-			Message("removing lease-file")
-		err = os.Remove(leaseFile)
-		if err != nil {
-			err = errors.Wrapf(err, "cannot remove lease file '%s'", lease)
+			Message("checking lease-file")
+		_, err = os.Stat(leaseFile)
+		// a retry after a Mount interrupted between attach and mount has no lease: it still gets
+		// to the cleanup below, never to a kernel mount
+		leaseMissing = os.IsNotExist(err)
+		if err != nil && !leaseMissing {
+			err = errors.Wrapf(err, "cannot stat lease file '%s'", lease)
 			return
 		}
+		err = nil
 	}
 
-	// check other usage
+	// check other usage; only a non-final lease is removed here: the final one stays until the
+	// kernel mount is gone, so a failed inspection or umount leaves the lease a retry needs
 	var isMountedAnywhereElse bool
 	{
 		ctx.
 			Level(context.Trace).
 			Message("checking if volume is mounted anywhere else")
-		isMountedAnywhereElse, err = volume.IsMounted(ctx.Derived())
-		if err != nil {
-			err = errors.Wrapf(err, "cannot figure out if volume is used anywhere else", lease)
+		var leaseFiles []os.FileInfo
+		leaseFiles, err = ioutil.ReadDir(volume.StateDir)
+		if err != nil && !os.IsNotExist(err) {
+			err = errors.Wrap(err, "cannot figure out if volume is used anywhere else")
 			return
+		}
+		err = nil
+		for _, leaseFileInfo := range leaseFiles {
+			isMountedAnywhereElse = isMountedAnywhereElse || leaseFileInfo.Name() != lease
+		}
+		if isMountedAnywhereElse {
+			ctx.
+				Level(context.Trace).
+				Field("lease-file", leaseFile).
+				Message("removing lease-file")
+			err = os.Remove(leaseFile)
+			if err != nil && !os.IsNotExist(err) {
+				err = errors.Wrapf(err, "cannot remove lease file '%s'", lease)
+				return
+			}
+			err = nil
 		}
 	}
 
@@ -785,11 +957,50 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 		if !isMountedAnywhereElse {
 			ctx.
 				Level(context.Trace).
-				Field("state-dir", volume.StateDir).
-				Message("removing volume's state-dir because it is not mounted anywhere else")
-			err = os.RemoveAll(volume.StateDir)
+				Message("checking if the volume is mounted at its internal mount-point")
+			var isMounted bool
+			isMounted, err = isMountPoint(volume.MountPointPath)
 			if err != nil {
-				err = errors.Wrapf(err, "cannot remove its state dir", lease)
+				err = errors.Wrap(err, "cannot check volume mount status")
+				return
+			}
+			if isMounted && leaseMissing {
+				// a kernel mount nobody holds a lease for is not this call's to tear down
+				err = errors.Errorf("cannot remove lease file '%s': it does not exist", lease)
+				return
+			}
+
+			if !isMounted {
+				// a Mount killed between attach and mount left a loop device and an empty
+				// mount-point dir; umount has nothing to do, and a RemoveAll here could eat files
+				ctx.
+					Level(context.Trace).
+					Message("no kernel mount: detaching loop devices of the data file that back no mount")
+				err = detachStrayLoops(ctx.Derived(), volume.DataFilePath)
+				if err != nil {
+					err = errors.Wrapf(err, "cannot detach the loop devices of '%s'", volume.DataFilePath)
+					return
+				}
+				err = os.Remove(volume.MountPointPath)
+				if err != nil && !os.IsNotExist(err) {
+					err = errors.Wrapf(err, "cannot remove mount point dir '%s'", volume.MountPointPath)
+					return
+				}
+				err = removeStateDir(ctx.Derived(), volume)
+				return
+			}
+
+			// what sits at the mount point must be this volume's own loop: Mount refused to hand
+			// out someone else's filesystem, and a lease that outlived the mount must not tear it down
+			var mountBelongsToVolume bool
+			mountBelongsToVolume, err = mountBelongsToDataFile(volume.MountPointPath, volume.DataFilePath)
+			if err != nil {
+				err = errors.Wrap(err, "cannot check what is mounted at the volume mount point")
+				return
+			}
+			if !mountBelongsToVolume {
+				err = errors.Errorf("mount point '%s' holds a filesystem that is not this volume's",
+					volume.MountPointPath)
 				return
 			}
 
@@ -805,6 +1016,10 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 					volume.DataFilePath, volume.MountPointPath, errStr)
 				return
 			}
+			err = removeStateDir(ctx.Derived(), volume)
+			if err != nil {
+				return
+			}
 			ctx.
 				Level(context.Trace).
 				Field("mount-point", volume.MountPointPath).
@@ -813,6 +1028,16 @@ func (m Manager) UnMount(ctx *context.Context, name string, lease string) (err e
 			if err != nil {
 				err = errors.Wrapf(err, "cannot remove mount point dir '%s'", volume.MountPointPath)
 				return
+			}
+
+			ctx.
+				Level(context.Trace).
+				Message("detaching loop devices of the data file that back no mount")
+			if strayErr := detachStrayLoops(ctx.Derived(), volume.DataFilePath); strayErr != nil {
+				ctx.
+					Level(context.Warning).
+					Field("error", strayErr).
+					Message("cannot detach stray loop devices; the volume is un-mounted")
 			}
 		}
 	}
@@ -886,6 +1111,19 @@ func (m Manager) Delete(ctx *context.Context, name string) (err error) {
 		}
 		if isMounted {
 			err = errors.Wrap(err, "volume still in use")
+			return
+		}
+	}
+
+	// detach what a killed plugin left attached: an unlinked data file keeps its loop device alive,
+	// and no later call could find it by this path, so the image stays for Docker's retry
+	{
+		ctx.
+			Level(context.Trace).
+			Message("detaching loop devices of the data file that back no mount")
+		err = detachStrayLoops(ctx.Derived(), volume.DataFilePath)
+		if err != nil {
+			err = errors.Wrapf(err, "cannot detach the loop devices of '%s'", volume.DataFilePath)
 			return
 		}
 	}

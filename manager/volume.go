@@ -5,9 +5,14 @@ import (
 	"github.com/pkg/errors"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// fsTypePattern takes the type out of a `file -b` description: "SGI XFS filesystem data (blksz
+// 4096, ...)", "Linux rev 1.0 ext4 filesystem data, UUID=..."
+var fsTypePattern = regexp.MustCompile(`(\S+) filesystem data`)
 
 type Volume struct {
 	Name                 string
@@ -89,9 +94,18 @@ func (v Volume) Fs(ctx *context.Context) (fs string, err error) {
 	var output string
 
 	if len(v.fs) == 0 {
-		output, err = runCommand(ctx.Derived(), "file", v.DataFilePath)
-		tokens := strings.Split(strings.TrimSpace(strings.Split(output, "filesystem")[0]), " ")
-		v.fs = strings.ToLower(tokens[len(tokens)-1])
+		// -b: the description without the path, which may itself contain "filesystem"
+		output, err = runCommandStdout(ctx.Derived(), "file", "-b", v.DataFilePath)
+		if err != nil {
+			err = errors.Wrapf(err, "cannot inspect the data file '%s'", v.DataFilePath)
+			return
+		}
+		match := fsTypePattern.FindStringSubmatch(output)
+		if match == nil {
+			err = errors.Errorf("cannot tell the filesystem type of '%s' from %q", v.DataFilePath, output)
+			return
+		}
+		v.fs = strings.ToLower(match[1])
 	}
 
 	fs = v.fs

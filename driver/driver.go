@@ -29,7 +29,9 @@ type Driver struct {
 
 var AllowedOptions = []string{"size", "sparse", "fs", "uid", "gid", "mode"}
 
-func New(ctx *context.Context, cfg Config) (driver Driver, err error) {
+func New(ctx *context.Context, cfg Config) (driver *Driver, err error) {
+	// a pointer: the handler must lock this mutex, not that of a copy
+	driver = &Driver{}
 	ctx = ctx.
 		Field(":func", "driver/New")
 	{
@@ -88,7 +90,7 @@ func New(ctx *context.Context, cfg Config) (driver Driver, err error) {
 	return
 }
 
-func (d Driver) Create(request *v.CreateRequest) (err error) {
+func (d *Driver) Create(request *v.CreateRequest) (err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Create")
@@ -295,7 +297,7 @@ func (d Driver) Create(request *v.CreateRequest) (err error) {
 	return
 }
 
-func (d Driver) List() (response *v.ListResponse, err error) {
+func (d *Driver) List() (response *v.ListResponse, err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/List")
@@ -362,7 +364,7 @@ func (d Driver) List() (response *v.ListResponse, err error) {
 	return
 }
 
-func (d Driver) Get(request *v.GetRequest) (response *v.GetResponse, err error) {
+func (d *Driver) Get(request *v.GetRequest) (response *v.GetResponse, err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Get")
@@ -434,7 +436,7 @@ func (d Driver) Get(request *v.GetRequest) (response *v.GetResponse, err error) 
 	return
 }
 
-func (d Driver) Remove(request *v.RemoveRequest) (err error) {
+func (d *Driver) Remove(request *v.RemoveRequest) (err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Remove")
@@ -484,7 +486,7 @@ func (d Driver) Remove(request *v.RemoveRequest) (err error) {
 	return
 }
 
-func (d Driver) Path(request *v.PathRequest) (response *v.PathResponse, err error) {
+func (d *Driver) Path(request *v.PathRequest) (response *v.PathResponse, err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Path")
@@ -547,7 +549,7 @@ func (d Driver) Path(request *v.PathRequest) (response *v.PathResponse, err erro
 	return
 }
 
-func (d Driver) Mount(request *v.MountRequest) (response *v.MountResponse, err error) {
+func (d *Driver) Mount(request *v.MountRequest) (response *v.MountResponse, err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Mount")
@@ -610,7 +612,7 @@ func (d Driver) Mount(request *v.MountRequest) (response *v.MountResponse, err e
 	return
 }
 
-func (d Driver) Unmount(request *v.UnmountRequest) (err error) {
+func (d *Driver) Unmount(request *v.UnmountRequest) (err error) {
 	// Context definition
 	ctx := context.New().
 		Field(":func", "driver/Unmount")
@@ -664,7 +666,7 @@ func (d Driver) Unmount(request *v.UnmountRequest) (err error) {
 	return
 }
 
-func (d Driver) Capabilities() *v.CapabilitiesResponse {
+func (d *Driver) Capabilities() *v.CapabilitiesResponse {
 	return &v.CapabilitiesResponse{
 		Capabilities: v.Capability{
 			Scope: "local",
