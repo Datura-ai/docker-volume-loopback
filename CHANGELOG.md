@@ -1,5 +1,24 @@
 # Change Log
 
+## 1.0.0-lium11 - 2026-11-03
+
+### Fixed
+
+- Delete fails with "volume still in use" while a lease is held: the check wrapped a nil error,
+  which is nil, so Delete reported success, skipped the unlink and the image stayed on disk. Since
+  UnMount keeps the final lease when it cannot un-mount, that lie was reachable.
+
+## 1.0.0-lium10 - 2026-10-30
+
+### Fixed
+
+- The filesystem type is taken from the brief `file` description, not from a data-file path that
+  may contain "filesystem".
+- UnMount refuses to un-mount a filesystem at the mount point that is not the volume's own, and
+  keeps the lease.
+- The loop devices of a data file are read from `losetup` stdout only when checking whose mount is
+  at the mount point.
+
 ## 1.0.0-lium9 - 2026-10-29
 
 ### Fixed

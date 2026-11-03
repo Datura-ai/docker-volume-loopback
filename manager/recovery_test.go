@@ -272,3 +272,35 @@ func TestUnMountLeavesAForeignFilesystemAtTheMountPointAndKeepsTheLease(t *testi
 		t.Fatalf("the retry left the state dir: %v", statErr)
 	}
 }
+
+func TestDeleteRefusesAVolumeWhoseFinalLeaseIsKept(t *testing.T) {
+	state, root := mountedFinalLease(t)
+	if err := os.WriteFile(filepath.Join(root, "umount-broken"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err == nil {
+		t.Fatal("UnMount succeeded although umount failed")
+	}
+
+	err := state.manager.Delete(context.New(), interruptedVolumeName)
+
+	if err == nil || !strings.Contains(err.Error(), "still in use") {
+		t.Fatalf("Delete of a volume that is still mounted returned %v", err)
+	}
+	if _, statErr := os.Stat(state.dataFile); statErr != nil {
+		t.Fatalf("Delete removed the image of a mounted volume: %v", statErr)
+	}
+	if err := os.Remove(filepath.Join(root, "umount-broken")); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.manager.UnMount(context.New(), interruptedVolumeName, "container-one"); err != nil {
+		t.Fatalf("the UnMount retry failed: %v", err)
+	}
+
+	if err := state.manager.Delete(context.New(), interruptedVolumeName); err != nil {
+		t.Fatalf("Delete after the UnMount failed: %v", err)
+	}
+	if _, statErr := os.Stat(state.dataFile); !os.IsNotExist(statErr) {
+		t.Fatalf("Delete after the UnMount left the image: %v", statErr)
+	}
+}

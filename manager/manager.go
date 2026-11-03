@@ -1110,7 +1110,8 @@ func (m Manager) Delete(ctx *context.Context, name string) (err error) {
 			return
 		}
 		if isMounted {
-			err = errors.Wrap(err, "volume still in use")
+			// a held lease is the error: Wrap(nil) would return nil and report the delete as done
+			err = errors.Errorf("volume '%s' still in use", name)
 			return
 		}
 	}
