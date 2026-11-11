@@ -1,5 +1,12 @@
 # Change Log
 
+## Unreleased
+
+### Changed
+
+- The build targets the build host's architecture instead of always amd64, so `make plugin` on an
+  arm64 Docker host gives an arm64 plugin (published under its own tag, e.g. `1.0.0-lium11-arm64`).
+
 ## 1.0.0-lium11 - 2026-11-03
 
 ### Fixed

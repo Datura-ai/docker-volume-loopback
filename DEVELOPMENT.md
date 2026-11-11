@@ -105,6 +105,13 @@ $ make plugin
   ...
 ``` 
 
+### Architecture
+
+The driver is built for the build host's architecture (`GOARCH`, default `go env GOARCH`), and
+`make plugin` builds it inside Docker, so the plugin takes the Docker host's architecture. A Docker
+managed plugin is single-architecture: build the arm64 plugin on an arm64 host (for example a
+Graviton instance) and publish it under its own tag, e.g. `1.0.0-lium11-arm64`.
+
 ## Versioning
 
 This project follow [Semantic Versioning](https://semver.org/)
