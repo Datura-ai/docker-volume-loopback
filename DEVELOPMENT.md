@@ -109,8 +109,15 @@ $ make plugin
 
 The driver is built for the build host's architecture (`GOARCH`, default `go env GOARCH`), and
 `make plugin` builds it inside Docker, so the plugin takes the Docker host's architecture. A Docker
-managed plugin is single-architecture: build the arm64 plugin on an arm64 host (for example a
-Graviton instance) and publish it under its own tag, e.g. `1.0.0-lium11-arm64`.
+managed plugin is single-architecture: build and publish the arm64 plugin on an arm64 host (for
+example a Graviton instance), logged in to Docker Hub; the build-and-push workflow runs on an amd64
+runner and publishes amd64 only:
+
+```bash
+$ make rootfs
+$ docker plugin create daturaai/docker-volume-loopback:1.0.0-lium11-arm64 ./plugin
+$ docker plugin push daturaai/docker-volume-loopback:1.0.0-lium11-arm64
+```
 
 ## Versioning
 
