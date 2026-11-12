@@ -4,6 +4,9 @@ PLUGIN_NAME		:= docker-volume-loopback
 PLUGIN_FULL_NAME	:= ${AUTHOR}/${PLUGIN_NAME}
 ROOTFS_CONTAINER	:= ${PLUGIN_NAME}-rootfs
 ROOTFS_IMAGE		:= ${AUTHOR}/${ROOTFS_CONTAINER}
+# the build host's architecture: inside the Dockerfile's builder that is the Docker host's, so
+# `make plugin` on an arm64 host gives an arm64 plugin
+GOARCH			?= $(shell go env GOARCH 2>/dev/null || echo amd64)
 
 
 .PHONY: all
@@ -17,7 +20,7 @@ format:
 
 .PHONY: build
 build:
-	GOOS=linux GOARCH=amd64 go build -o $(PLUGIN_NAME)
+	GOOS=linux GOARCH=$(GOARCH) go build -o $(PLUGIN_NAME)
 
 
 .PHONY: test
