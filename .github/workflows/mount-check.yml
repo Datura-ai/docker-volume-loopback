@@ -8,6 +8,11 @@ on:
       push_tag:
         description: "build the plugin from this commit and push it to Docker Hub under this tag (e.g. 1.0.0-lium4)"
         required: true
+      arch:
+        description: "runner architecture to build on (arm64 tags end in -arm64)"
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
 env:
   # the published build the dind check installs; bump after a push
   PLUGIN_TAG: 1.0.0-lium10
@@ -66,14 +71,23 @@ jobs:
   build-and-push:
     if: github.event_name == 'workflow_dispatch'
     needs: [direct-io-loop]
-    runs-on: ubuntu-latest
+    # docker plugin create packs the runner's architecture, so arm64 builds on an arm64 runner
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     env:
       PUSH_TAG: ${{ inputs.push_tag }}
+      ARCH: ${{ inputs.arch }}
     steps:
       - uses: actions/checkout@v4
       - name: build the plugin rootfs and create the plugin
         run: |
-          echo "$PUSH_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-lium[0-9]+$' || { echo "push_tag must look like 1.0.0-lium5"; exit 1; }
+          echo "$PUSH_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-lium[0-9]+(-arm64)?$' || { echo "push_tag must look like 1.0.0-lium5 or 1.0.0-lium5-arm64"; exit 1; }
+          # the arch input, the tag suffix and the runner must agree: a plugin only runs on the architecture it was built on
+          case "$ARCH:$PUSH_TAG:$(uname -m)" in
+            arm64:*-arm64:aarch64) ;;
+            amd64:*-arm64:*) echo "an amd64 build cannot use a -arm64 tag"; exit 1 ;;
+            amd64:*:x86_64) ;;
+            *) echo "arch=$ARCH, tag $PUSH_TAG and runner $(uname -m) do not match"; exit 1 ;;
+          esac
           make rootfs
           docker plugin create "daturaai/docker-volume-loopback:$PUSH_TAG" ./plugin
       - name: push
